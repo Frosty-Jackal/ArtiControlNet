@@ -9,7 +9,3 @@ Server-end:
 
 Back-end with Database : Java by wzh
 Back-end with ControlNet : Python FastApi by hxz
-
-Operator-end: 
-
-Python Gradio by hr 
