@@ -7,10 +7,10 @@
 
 ## Client-end（客户端）:
 
-- Front-end Code: Web by wzh（王哲灏）
+- Front-end Code: Web by wzh（王哲颢）
 - Front-end UI Design: by hkx（胡可欣）
 
 ## Server-end（服务端）:
 
-- Back-end with Database : Java, Springboot by wzh（王哲灏）
+- Back-end with Database : Java, Springboot by wzh（王哲颢）
 - Back-end with AI: Python, FastAPI by hxz（何贤哲）
