@@ -5,6 +5,9 @@
 我们的队伍组成如下:
 ![Our Team](./GithubPage/OurTeam.jpg)
 
+我们的技术路线如下：
+![Tech Route](./GithubPage/TechRoute.png)
+
 ## Client-end（客户端）:
 
 - Front-end Code: Web by wzh（王哲颢）
