@@ -1,11 +1,16 @@
-# ArtiControlNet
-Empower artists with ControlNet!
+# ArtiControlNet: Empower artists with ControlNet!
+<img align="center" src="https://skillicons.dev/icons?i=java,js,css,html,python,pytorch,spring,maven,fastapi,ps,mysql,postgres&theme=light" />
 
-User-end:
+## 大学生创新项目——“基于进化算法的条件扩散模型高效架构探究”
+我们的队伍组成如下:
+![Our Team](./GithubPage/OurTeam.jpg)
 
-Front-end : Android by wzh
+## Client-end（客户端）:
 
-Server-end:
+- Front-end Code: Web by wzh（王哲灏）
+- Front-end UI Design: by hkx（胡可欣）
 
-Back-end with Database : Java by wzh
-Back-end with ControlNet : Python FastApi by hxz
+## Server-end（服务端）:
+
+- Back-end with Database : Java, Springboot by wzh（王哲灏）
+- Back-end with AI: Python, FastAPI by hxz（何贤哲）
