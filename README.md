@@ -2,11 +2,14 @@
 <img align="center" src="https://skillicons.dev/icons?i=java,js,css,html,python,pytorch,spring,maven,fastapi,ps,mysql,postgres&theme=light" />
 
 ## 大学生创新项目——“基于进化算法的条件扩散模型高效架构探究”
-我们的队伍组成如下:
-![Our Team](./GithubPage/OurTeam.jpg)
 
-我们的技术路线如下：
+### 项目的技术路线：
+
 ![Tech Route](./GithubPage/TechRoute.png)
+
+### 你是否思考过，条件扩散模型可以干什么？
+
+![WhatCanControlNetDo](./GithubPage/WhatCanControlNetDo.png)
 
 ## Client-end（客户端）:
 
@@ -17,3 +20,8 @@
 
 - Back-end with Database : Java, Springboot by wzh（王哲颢）
 - Back-end with AI: Python, FastAPI by hxz（何贤哲）
+
+## 致谢
+
+我们的队伍组成如下:
+![Our Team](./GithubPage/OurTeam.jpg)
