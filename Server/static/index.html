@@ -125,8 +125,8 @@
                     });
 
                     try {
-                        // 注意：这里需要根据你后端的实际 IP 修改地址
-                        const response = await axios.post('http://localhost:8000/api/controlnet/generate_canny', formData);
+                        // 使用相对路径，前后端同源
+                        const response = await axios.post('/api/controlnet/generate_canny', formData);
 
                         // 假设后端返回的是 base64 列表： { "results": ["data:image/png;base64,..."] }
                         if (response.data.status === "success") {
