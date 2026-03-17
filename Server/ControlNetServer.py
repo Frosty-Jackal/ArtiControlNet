@@ -59,9 +59,16 @@ class ControlNetServer:
 
             # 新增 Scribble 路由
         @self.app.post("/api/controlnet/generate_scribble")
-        async def generate_scribble_endpoint(request: ControlNetRequest):  # 复用 Request 类即可
+        async def generate_scribble_endpoint(request: ControlNetRequest):
+            try:
                 return await self.scribble_tool.inference(request)
+            except Exception as ex:
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=str(ex))
 
 
     def run(self, host="0.0.0.0", port=6006):
-            uvicorn.run(self.app, host=host, port=port)
+        uvicorn.run(self.app, host=host, port=port)
+
+if __name__ == "__main__":
+    ControlNetServer().run()

@@ -1,4 +1,4 @@
-name: control_fastapi
+name: controlnet_agent
 channels:
   - pytorch
   - defaults

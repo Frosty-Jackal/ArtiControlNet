@@ -1,11 +1,13 @@
 import io
 import torch
 import numpy as np
+import os
 
 from PIL import Image
 from fastapi.concurrency import run_in_threadpool
 from annotator.canny import CannyDetector
 from annotator.util import HWC3, resize_image
+from pathlib import Path
 
 # 引入兄弟模块
 from Server.utils import ImageUtils
@@ -22,8 +24,16 @@ class CannyTool:
         self.engine = engine
         self.detector = CannyDetector()
         # 定义该工具需要的模型路径
-        self.config_path = 'models/cldm_v15.yaml'
-        self.model_path = 'models/control_sd15_canny.pth'
+        project_root = Path(__file__).resolve().parents[2]
+        models_dir = project_root / "models"
+
+        self.config_path = str(models_dir / "cldm_v15.yaml")
+        self.model_path = str(models_dir / "control_sd15_canny.pth")
+
+        if not os.path.exists(self.config_path):
+            raise FileNotFoundError(f"找不到配置文件: {self.config_path}")
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"找不到模型权重: {self.model_path}")
 
     # 图片预处理
     def image_process(
@@ -43,8 +53,7 @@ class CannyTool:
             detected_map = HWC3(detected_map)  # 确保是三通道
 
             # 准备控制张量
-            control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
-
+            control = torch.from_numpy(detected_map.copy()).float()
             return detected_map, H, W, C, control
 
     async def inference(self,request: ControlNetRequest):
@@ -100,11 +109,7 @@ class CannyTool:
             # 我们通常希望 Agent 既能看到边缘图(调试用)，也能看到结果图
 
             # 直接转 Base64
-            output_data = []
-            for img_array in results:
-                # 核心：转成 Base64 字符串
-                b64 = ImageUtils.image_to_base64(img_array)
-                output_data.append(b64)
+            output_data = [ImageUtils.image_to_base64(img_array) for img_array in results]
 
             return {
                 "status": "success",

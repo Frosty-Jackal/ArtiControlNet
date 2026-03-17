@@ -43,28 +43,26 @@ class StableDiffusionEngine:
 
         #卸载旧模型并清理显存
         if self.model is not None:
-            # 将模型移回 CPU (有时候有助于彻底断开 CUDA 引用)
             self.model.cpu()
             del self.model
             del self.ddim_sampler
             self.model = None
             self.ddim_sampler = None
-
-            # 强制垃圾回收
             gc.collect()
-            # 清空 PyTorch 显存缓存
-            torch.cuda.empty_cache()
-            print("Old model unloaded and VRAM cleared.")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # 3. 加载新模型
         try:
             self.model = create_model(config_path).cpu()
-            self.model.load_state_dict(load_state_dict(model_path, location='cuda'))
-            self.model = self.model.cuda()
+            self.model.load_state_dict(load_state_dict(model_path, location=device))
+            self.model = self.model.to(device)
             self.model.eval()
             self.ddim_sampler = DDIMSampler(self.model)
 
-            if config.save_memory:
+            if config.save_memory and device == "cuda":
                 self.model.low_vram_shift(is_diffusing=False)
 
             # 更新当前状态
@@ -108,7 +106,7 @@ class StableDiffusionEngine:
                 seed = random.randint(0, 65535)
             seed_everything(seed)
 
-            if config.save_memory:
+            if config.save_memory and torch.cuda.is_available():
                 self.model.low_vram_shift(is_diffusing=False)
 
              # 获取条件向量 (Prompt)
@@ -151,7 +149,7 @@ class StableDiffusionEngine:
                                                          shape, cond, verbose=False, eta=eta,
                                                          unconditional_guidance_scale=scale,
                                                          unconditional_conditioning=un_cond)
-            if config.save_memory:
+            if config.save_memory and torch.cuda.is_available():
                 self.model.low_vram_shift(is_diffusing=False)
 
             # 解码

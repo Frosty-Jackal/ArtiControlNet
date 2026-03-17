@@ -1,148 +1,518 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ControlNet Canny 生成器</title>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ArtiControlNet 前端</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(18, 24, 45, 0.88);
+      --panel-2: rgba(25, 33, 61, 0.9);
+      --text: #edf2ff;
+      --muted: #a9b4d0;
+      --line: rgba(255,255,255,0.1);
+      --primary: #6ea8fe;
+      --primary-2: #8b5cf6;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --shadow: 0 16px 50px rgba(0,0,0,.35);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 20% 10%, rgba(110,168,254,.18), transparent 30%),
+        radial-gradient(circle at 80% 15%, rgba(139,92,246,.18), transparent 28%),
+        linear-gradient(180deg, #0b1020 0%, #11172d 100%);
+    }
+    .app {
+      width: min(1200px, calc(100vw - 24px));
+      margin: 18px auto;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+    .sidebar { padding: 18px; }
+    .main { display: grid; grid-template-rows: auto 1fr auto; min-height: calc(100vh - 36px); }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+      line-height: 1.15;
+      letter-spacing: .2px;
+    }
+    .sub { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+    .section-title { font-size: 13px; color: var(--muted); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: .08em; }
+    label { display:block; font-size: 13px; margin-bottom: 6px; color: var(--muted); }
+    input[type="text"], textarea {
+      width: 100%;
+      border: 1px solid rgba(255,255,255,.12);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 14px;
+      outline: none;
+      padding: 12px 14px;
+      font-size: 14px;
+      transition: .18s ease;
+    }
+    input[type="text"]:focus, textarea:focus {
+      border-color: rgba(110,168,254,.55);
+      box-shadow: 0 0 0 4px rgba(110,168,254,.12);
+    }
+    textarea { resize: vertical; min-height: 92px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btns { display:flex; flex-wrap:wrap; gap:10px; }
+    button, .file-btn {
+      border: 0;
+      border-radius: 14px;
+      padding: 11px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform .15s ease, opacity .15s ease, box-shadow .15s ease;
+    }
+    button:hover, .file-btn:hover { transform: translateY(-1px); }
+    .primary {
+      color: white;
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
+      box-shadow: 0 8px 24px rgba(110,168,254,.25);
+    }
+    .secondary {
+      background: rgba(255,255,255,.08);
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,.09);
+    }
+    .danger {
+      background: rgba(239,68,68,.13);
+      color: #fecaca;
+      border: 1px solid rgba(239,68,68,.24);
+    }
+    .success {
+      background: rgba(34,197,94,.14);
+      color: #bbf7d0;
+      border: 1px solid rgba(34,197,94,.24);
+    }
+    .hint, .status {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .status.ok { color: #bbf7d0; }
+    .status.err { color: #fecaca; }
+    .status.warn { color: #fde68a; }
+    .chat-head {
+      padding: 18px 20px 12px;
+      border-bottom: 1px solid var(--line);
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+    }
+    .chat-head h2 { margin:0; font-size: 18px; }
+    .chat-meta { color: var(--muted); font-size: 12px; }
+    .messages {
+      padding: 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .bubble {
+      max-width: 86%;
+      border-radius: 18px;
+      padding: 14px 16px;
+      border: 1px solid rgba(255,255,255,.08);
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, rgba(110,168,254,.18), rgba(139,92,246,.18));
+    }
+    .bubble.assistant {
+      align-self: flex-start;
+      background: rgba(255,255,255,.05);
+    }
+    .bubble .role {
+      display:block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .bubble img {
+      max-width: 100%;
+      display:block;
+      margin-top: 10px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,.12);
+    }
+    .composer {
+      border-top: 1px solid var(--line);
+      padding: 14px 18px 18px;
+      display:grid;
+      gap:12px;
+    }
+    .composer-row {
+      display:grid;
+      grid-template-columns: 1fr auto;
+      gap:12px;
+      align-items:end;
+    }
+    .toolbar {
+      display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+    }
+    .preview {
+      display:none;
+      border: 1px dashed rgba(255,255,255,.18);
+      border-radius: 16px;
+      padding: 12px;
+      background: rgba(255,255,255,.03);
+    }
+    .preview.active { display:block; }
+    .preview img {
+      width: 100%;
+      max-height: 240px;
+      object-fit: contain;
+      border-radius: 12px;
+      background: rgba(0,0,0,.2);
+    }
+    .preview-meta {
+      margin-top: 10px;
+      display:flex; align-items:center; justify-content:space-between; gap:8px;
+      color: var(--muted); font-size: 12px;
+    }
+    input[type="file"] { display:none; }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .spinner {
+      width: 15px; height: 15px; border: 2px solid rgba(255,255,255,.18); border-top-color: white; border-radius: 50%; display:inline-block;
+      animation: spin 1s linear infinite; vertical-align: -3px; margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .main { min-height: auto; }
+      .bubble { max-width: 100%; }
+    }
+  </style>
 </head>
-<body class="bg-gray-100 min-h-screen">
-    <div id="app" class="container mx-auto px-4 py-8">
-        <h1 class="text-3xl font-bold text-center mb-8 text-indigo-700">ControlNet Canny 控制面板</h1>
+<body>
+  <div class="app">
+    <aside class="card sidebar">
+      <h1>ArtiControlNet</h1>
+      <div class="sub">直接对接你当前的 <span class="mono">/api/chat</span> 后端。</div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div class="bg-white p-6 rounded-lg shadow-md space-y-4">
-                <h2 class="text-xl font-semibold border-b pb-2">配置参数</h2>
+      <div class="section-title">连接设置</div>
+      <label for="backendUrl">后端接口地址</label>
+      <input id="backendUrl" type="text" value="http://localhost:8000/api/chat" />
+      <div class="btns" style="margin-top:10px;">
+        <button class="secondary" id="testBtn">测试后端</button>
+        <button class="secondary" id="resetThreadBtn">重置线程</button>
+      </div>
+      <div id="connStatus" class="status" style="margin-top:10px;">尚未连接测试</div>
 
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">上传原始图片</label>
-                    <input type="file" @change="handleFileUpload" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
-                </div>
+      <div class="section-title">会话状态</div>
+      <div class="hint">当前线程 ID 会在同一页面内自动保留，用于多轮对话。你的后端请求体要求这 3 个字段：<span class="mono">message / image_url / thread_id</span>。fileciteturn16file6</div>
+      <div id="threadBox" class="mono" style="margin-top:10px;">thread_id: (none)</div>
 
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">提示词 (Prompt)</label>
-                    <textarea v-model="form.prompt" rows="3" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 border p-2 text-sm"></textarea>
-                </div>
+      <div class="section-title">参考图</div>
+      <label class="file-btn secondary" for="imageInput">选择图片</label>
+      <input id="imageInput" type="file" accept="image/*" />
+      <div class="btns" style="margin-top:10px;">
+        <button class="secondary" id="reuseToggleBtn">参考图：开启</button>
+        <button class="danger" id="clearImageBtn">清除参考图</button>
+      </div>
+      <div class="hint" style="margin-top:10px;">上传后会自动转为 base64 发给后端；后端会把它转存到临时目录，再交给 router。fileciteturn16file6</div>
 
-                <div class="grid grid-cols-2 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">步数 (Steps)</label>
-                        <input type="number" v-model="form.ddim_steps" class="mt-1 block w-full border rounded p-1 text-sm">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">引导 (Scale)</label>
-                        <input type="number" step="0.5" v-model="form.scale" class="mt-1 block w-full border rounded p-1 text-sm">
-                    </div>
-                </div>
-
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Canny 阈值 (低: {{form.low_threshold}} 高: {{form.high_threshold}})</label>
-                    <div class="flex space-x-2">
-                        <input type="range" min="1" max="255" v-model="form.low_threshold" class="w-full">
-                        <input type="range" min="1" max="255" v-model="form.high_threshold" class="w-full">
-                    </div>
-                </div>
-
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">控制强度: {{form.strength}}</label>
-                    <input type="range" min="0" max="2" step="0.1" v-model="form.strength" class="w-full">
-                </div>
-
-                <button @click="generate" :disabled="loading" class="w-full bg-indigo-600 text-white py-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-400 transition">
-                    {{ loading ? '生成中...' : '开始生成' }}
-                </button>
-            </div>
-
-            <div class="lg:col-span-2 space-y-6">
-                <div class="bg-white p-6 rounded-lg shadow-md min-h-[400px]">
-                    <h2 class="text-xl font-semibold border-b pb-2 mb-4">生成结果</h2>
-
-                    <div v-if="!results.length && !loading" class="flex items-center justify-center h-64 text-gray-400">
-                        上传图片并点击“开始生成”查看结果
-                    </div>
-
-                    <div v-if="loading" class="flex flex-col items-center justify-center h-64">
-                        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
-                        <p class="mt-4 text-gray-500">正在处理，请稍候（取决于 GPU 性能）...</p>
-                    </div>
-
-                    <div v-if="results.length" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div v-for="(img, index) in results" :key="index" class="border rounded overflow-hidden">
-                            <p class="text-xs bg-gray-100 p-1 text-center font-mono">{{ index === 0 ? 'Canny Edge' : 'Generated Image ' + index }}</p>
-                            <img :src="img" class="w-full h-auto">
-                        </div>
-                    </div>
-                </div>
-            </div>
+      <div id="previewBox" class="preview" style="margin-top:12px;">
+        <img id="previewImg" alt="preview" />
+        <div class="preview-meta">
+          <span id="previewName">未选择</span>
+          <span id="previewSize"></span>
         </div>
-    </div>
+      </div>
 
-    <script>
-        const { createApp, ref } = Vue;
+      <div class="section-title">快捷提示</div>
+      <div class="btns">
+        <button class="secondary quick">把这张线稿转成赛博朋克风</button>
+        <button class="secondary quick">把这张草图变成精美二次元插画</button>
+        <button class="secondary quick">总结一下这张图的风格特点</button>
+      </div>
+    </aside>
 
-        createApp({
-            setup() {
-                const loading = ref(false);
-                const selectedFile = ref(null);
-                const results = ref([]);
+    <section class="card main">
+      <div class="chat-head">
+        <div>
+          <h2>智能绘图聊天</h2>
+          <div class="chat-meta">支持多轮、参考图复用、后端 markdown 图片回显</div>
+        </div>
+        <div class="btns">
+          <button class="secondary" id="clearChatBtn">清空聊天</button>
+        </div>
+      </div>
 
-                const form = ref({
-                    prompt: "a beautiful landscape, oil painting",
-                    a_prompt: "best quality, extremely detailed",
-                    n_prompt: "lowres, bad anatomy, worst quality, low quality",
-                    num_samples: 1,
-                    image_resolution: 512,
-                    ddim_steps: 20,
-                    scale: 9.0,
-                    seed: -1,
-                    low_threshold: 100,
-                    high_threshold: 200,
-                    strength: 1.0,
-                    guess_mode: false
-                });
+      <div id="messages" class="messages">
+        <div class="bubble assistant">
+          <span class="role">助手</span>
+          你好，上传一张参考图后，可以直接说：
+          - 把这张图改成赛博朋克风
+          - 转成二次元插画
+          - 按这张图的轮廓继续生成
+        </div>
+      </div>
 
-                const handleFileUpload = (event) => {
-                    selectedFile.value = event.target.files[0];
-                };
+      <div class="composer">
+        <div class="toolbar">
+          <div id="sendStatus" class="status">准备就绪</div>
+          <div class="hint">Enter 发送，Shift + Enter 换行</div>
+        </div>
+        <div class="composer-row">
+          <textarea id="messageInput" placeholder="输入你的要求，例如：把这张线稿转换成赛博朋克风...\n如果已经上传了参考图，后续也可以继续沿用。"></textarea>
+          <button class="primary" id="sendBtn">发送</button>
+        </div>
+      </div>
+    </section>
+  </div>
 
-                const generate = async () => {
-                    if (!selectedFile.value) {
-                        alert("请先选择一张图片！");
-                        return;
-                    }
+  <script>
+    const state = {
+      threadId: null,
+      imageBase64: null,
+      imageName: null,
+      imageReuse: true,
+      sending: false,
+    };
 
-                    loading.value = true;
-                    results.value = [];
+    const $ = (id) => document.getElementById(id);
+    const backendUrl = $("backendUrl");
+    const connStatus = $("connStatus");
+    const threadBox = $("threadBox");
+    const previewBox = $("previewBox");
+    const previewImg = $("previewImg");
+    const previewName = $("previewName");
+    const previewSize = $("previewSize");
+    const imageInput = $("imageInput");
+    const messages = $("messages");
+    const messageInput = $("messageInput");
+    const sendStatus = $("sendStatus");
+    const sendBtn = $("sendBtn");
+    const reuseToggleBtn = $("reuseToggleBtn");
 
-                    const formData = new FormData();
-                    formData.append('image', selectedFile.value);
+    function setStatus(el, text, cls = "") {
+      el.className = `status ${cls}`.trim();
+      el.textContent = text;
+    }
 
-                    // 将所有表单参数加入 FormData
-                    Object.keys(form.value).forEach(key => {
-                        formData.append(key, form.value[key]);
-                    });
+    function updateThread() {
+      threadBox.textContent = `thread_id: ${state.threadId || '(none)'}`;
+    }
 
-                    try {
-                        // 使用相对路径，前后端同源
-                        const response = await axios.post('/api/controlnet/generate_canny', formData);
+    function updateReuseLabel() {
+      reuseToggleBtn.textContent = `参考图：${state.imageReuse ? '开启' : '关闭'}`;
+    }
 
-                        // 假设后端返回的是 base64 列表： { "results": ["data:image/png;base64,..."] }
-                        if (response.data.status === "success") {
-                            results.value = response.data.images;
-                        }
-                    } catch (error) {
-                        console.error("生成失败:", error);
-                        alert("生成失败，请检查后端服务是否启动。");
-                    } finally {
-                        loading.value = false;
-                    }
-                };
+    function bytesToReadable(bytes) {
+      if (!bytes && bytes !== 0) return "";
+      const units = ["B", "KB", "MB", "GB"];
+      let n = bytes, i = 0;
+      while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+      return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+    }
 
-                return { form, handleFileUpload, generate, loading, results };
-            }
-        }).mount('#app');
-    </script>
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function markdownToHtml(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" />');
+      html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      html = html.replace(/\n/g, '<br>');
+      return html;
+    }
+
+    function addBubble(role, content, useMarkdown = false) {
+      const div = document.createElement('div');
+      div.className = `bubble ${role}`;
+      const roleLabel = role === 'user' ? '用户' : '助手';
+      div.innerHTML = `<span class="role">${roleLabel}</span>${useMarkdown ? markdownToHtml(content) : escapeHtml(content).replace(/\n/g, '<br>')}`;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+      return div;
+    }
+
+    function setSending(flag) {
+      state.sending = flag;
+      sendBtn.disabled = flag;
+      messageInput.disabled = flag;
+      imageInput.disabled = flag;
+      if (flag) {
+        sendBtn.innerHTML = '<span class="spinner"></span>发送中';
+        setStatus(sendStatus, '正在请求后端...', 'warn');
+      } else {
+        sendBtn.textContent = '发送';
+      }
+    }
+
+    async function fileToBase64(file) {
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    imageInput.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        state.imageBase64 = await fileToBase64(file);
+        state.imageName = file.name;
+        previewImg.src = state.imageBase64;
+        previewName.textContent = file.name;
+        previewSize.textContent = bytesToReadable(file.size);
+        previewBox.classList.add('active');
+        setStatus(sendStatus, '参考图已就绪', 'ok');
+      } catch (err) {
+        console.error(err);
+        setStatus(sendStatus, '读取图片失败', 'err');
+      }
+    });
+
+    $("clearImageBtn").addEventListener('click', () => {
+      state.imageBase64 = null;
+      state.imageName = null;
+      imageInput.value = '';
+      previewBox.classList.remove('active');
+      previewImg.removeAttribute('src');
+      previewName.textContent = '未选择';
+      previewSize.textContent = '';
+      setStatus(sendStatus, '已清除参考图', 'ok');
+    });
+
+    reuseToggleBtn.addEventListener('click', () => {
+      state.imageReuse = !state.imageReuse;
+      updateReuseLabel();
+    });
+
+    $("resetThreadBtn").addEventListener('click', () => {
+      state.threadId = null;
+      updateThread();
+      setStatus(connStatus, '线程已重置', 'ok');
+    });
+
+    $("clearChatBtn").addEventListener('click', () => {
+      messages.innerHTML = '';
+      addBubble('assistant', '聊天已清空。你可以继续上传图片并发起新对话。');
+    });
+
+    document.querySelectorAll('.quick').forEach(btn => {
+      btn.addEventListener('click', () => { messageInput.value = btn.textContent.trim(); messageInput.focus(); });
+    });
+
+    $("testBtn").addEventListener('click', async () => {
+      setStatus(connStatus, '正在测试后端...', 'warn');
+      try {
+        const payload = { message: '你好', image_url: "", thread_id: "" };
+        const res = await fetch(backendUrl.value.trim(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const text = await res.text();
+        if (!res.ok) {
+          setStatus(connStatus, `连接失败：${res.status} ${text}`, 'err');
+          return;
+        }
+        setStatus(connStatus, '后端连接正常', 'ok');
+      } catch (err) {
+        setStatus(connStatus, `连接失败：${err.message}`, 'err');
+      }
+    });
+
+    async function sendMessage() {
+      if (state.sending) return;
+      const text = messageInput.value.trim();
+      if (!text && !state.imageBase64) {
+        setStatus(sendStatus, '请输入内容或选择一张图片', 'warn');
+        return;
+      }
+
+      const currentImage = state.imageReuse ? state.imageBase64 : (imageInput.files?.[0] ? state.imageBase64 : null);
+      const userText = text || '（仅发送参考图）';
+      addBubble('user', currentImage ? `${userText}\n\n参考图：${state.imageName || '已上传'}` : userText, false);
+      messageInput.value = '';
+
+      setSending(true);
+      const pending = addBubble('assistant', '思考中...', false);
+
+      try {
+        const payload = {
+          message: text || '请根据这张图生成结果',
+          image_url: currentImage ? String(currentImage) : '',
+          thread_id: state.threadId ? String(state.threadId) : '',
+};
+
+        const res = await fetch(backendUrl.value.trim(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const raw = await res.text();
+        let data = null;
+        try { data = JSON.parse(raw); } catch (_) {}
+
+        if (!res.ok) {
+          pending.innerHTML = `<span class="role">助手</span>${escapeHtml(`请求失败：${res.status}\n${raw}`)}`;
+          setStatus(sendStatus, '请求失败', 'err');
+          return;
+        }
+
+        state.threadId = data?.thread_id || state.threadId;
+        updateThread();
+
+        const reply = data?.response ?? raw;
+        pending.innerHTML = `<span class="role">助手</span>${markdownToHtml(reply)}`;
+        setStatus(sendStatus, '已收到回复', 'ok');
+      } catch (err) {
+        pending.innerHTML = `<span class="role">助手</span>${escapeHtml(`请求异常：${err.message}`)}`;
+        setStatus(sendStatus, '请求异常', 'err');
+      } finally {
+        setSending(false);
+        messages.scrollTop = messages.scrollHeight;
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    messageInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    updateThread();
+    updateReuseLabel();
+  </script>
 </body>
 </html>

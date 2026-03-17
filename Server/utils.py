@@ -22,23 +22,26 @@ class ImageUtils:
 
     @staticmethod
     def download_image_from_url(url: str) -> bytes:
-        """超级加载器：支持 Base64、URL 和 本地路径"""
-        # 1. Base64 处理 (Web 服务核心)
+        """支持 Base64、URL 和本地路径"""
+        if not url:
+            raise ValueError("image_url 不能为空")
+
+        # 1. Base64
         if url.startswith("data:image"):
             try:
-                # 去掉前缀 "data:image/jpeg;base64,"
-                header, encoded = url.split(",", 1)
+                _, encoded = url.split(",", 1)
                 return base64.b64decode(encoded)
             except Exception as e:
-                print(f"Base64 解码失败: {e}")
+                raise ValueError(f"Base64 解码失败: {e}") from e
 
-        # 2. 本地文件 (同机部署兼容)
+        # 2. 本地路径
         if os.path.exists(url):
             with open(url, "rb") as f:
                 return f.read()
 
         # 3. 网络 URL
         response = requests.get(url, timeout=30)
+        response.raise_for_status()
         return response.content
 
     # save_image_to_disk 函数可以保留，用于调试，但 Web 流程主要用上面的 image_to_base64

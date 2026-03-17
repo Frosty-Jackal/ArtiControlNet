@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import torch
+from pathlib import Path
+import os
 from annotator.util import HWC3, resize_image
 from fastapi.concurrency import run_in_threadpool
 from Server.utils import ImageUtils
@@ -8,9 +10,16 @@ from Server.utils import ImageUtils
 class ScribbleTool:
     def __init__(self, engine):
         self.engine = engine
-        self.config_path = 'models/cldm_v15.yaml'
-        self.model_path = 'models/control_sd15_scribble.pth'
+        project_root = Path(__file__).resolve().parents[2]
+        models_dir = project_root / "models"
 
+        self.config_path = str(models_dir / "cldm_v15.yaml")
+        self.model_path = str(models_dir / "control_sd15_scribble.pth")
+
+        if not os.path.exists(self.config_path):
+            raise FileNotFoundError(f"找不到配置文件: {self.config_path}")
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"找不到模型权重: {self.model_path}")
     def _preprocess_sync(self, image_np, resolution):
         """
         同步预处理：智能反色 + 噪点清理
@@ -45,8 +54,7 @@ class ScribbleTool:
             detected_map = HWC3(binary)
 
             # 6. 归一化并转 Tensor
-            control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
-
+            control = torch.from_numpy(detected_map.copy()).float()
             return detected_map, H, W, C, control
 
     async def inference(self, request):
@@ -88,7 +96,8 @@ class ScribbleTool:
             )
 
             # 5. 保存
-            output_data = []
+            output_data = [ImageUtils.image_to_base64(img_array) for img_array in results]
+
             for img_array in results:
                 # 核心：转成 Base64 字符串
                 b64 = ImageUtils.image_to_base64(img_array)
