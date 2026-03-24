@@ -1,0 +1,48 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: ArtiControlNet-Backend
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 修改为实际数据库地址、用户名和密码
+    url: jdbc:mysql://localhost:3306/arti_control_net?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowMultiQueries=true
+    username: root
+    password: wang123456
+
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+
+  # 文件上传限制，图片可能较大，适当放宽
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+mybatis-plus:
+  configuration:
+    # 开启驼峰映射（数据库 snake_case -> Java camelCase）
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      # 主键策略：数据库自增
+      id-type: auto
+
+# Python FastAPI 服务地址
+python:
+  server:
+    url: http://localhost:8000
+
+logging:
+  level:
+    com.project: DEBUG
+    org.springframework.web: INFO
