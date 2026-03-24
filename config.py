@@ -5,7 +5,7 @@ from pathlib import Path
 save_memory = False
 
 # API 配置
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-33b4f0d880454dcbbadb453e79d0717e")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "erzi")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-chat")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
