@@ -1,41 +1,94 @@
-# ArtiControlNet: Revolutionize Artistic Creation with Multi-Agent AIGC!
-<img align="center" src="https://skillicons.dev/icons?i=java,js,css,html,python,pytorch,spring,maven,fastapi,ps,mysql,postgres&theme=light" />
+# ArtiControlNet 运行说明书
 
-## 大学生创新项目——“基于进化算法的条件扩散模型高效架构探究”
-![cover](./GithubPage/cover.jpg)
+多智能体 AIGC 对话工作台：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」。
+无本地推理、无数据库，仅前端 + 后端两层。详细设计见 [Spec.md](./Spec.md)。
 
-### 亮点页面展示：
+> **记住一句话：网站由后端托管，日常使用只需启动后端；前端只在改代码时才需要碰。**
 
-![demo1](./GithubPage/demo1.jpg)
+| 层 | 选型 |
+|---|---|
+| 前端 | Vue 3 + Vite + Pinia + Axios + marked/DOMPurify（Markdown 渲染） |
+| 后端 | Python 3.10+ · FastAPI · Uvicorn · LangGraph |
+| 模型 | DeepSeek（路由 + 视觉 QA）· TokenHub `hy-image-v3`（文生图 + 线稿生图） |
 
-![demo2](./GithubPage/demo2.jpg)
+> 以下命令为 **Git Bash** 语法（Windows 自带 Git Bash 即可执行）。
+> 所有 API 密钥只放在 `Server/.env`（已 gitignore），切勿提交或外发。
 
-### “艺术无处不在”
-### 同学，你是否思考过，条件扩散模型可以为艺术领域做什么？
+---
 
-![WhatCanControlNetDo](./GithubPage/WhatCanControlNetDo.png)
+## 一、首次安装（每台机器只装一次）
 
-### 项目的技术路线：
+```bash
+# 后端依赖 + 密钥模板
+cd Server
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
+cp .env.example .env          # 复制后填入 DEEPSEEK_API_KEY、TOKENHUB_API_KEY
 
-![Tech Route](./GithubPage/TechRoute.png)
+# 前端依赖
+cd ../frontend
+npm install
+```
 
-### 项目架构图：
-![Architecture](./GithubPage/Arch.png)
+## 二、启动网站（日常就这一条命令）
 
-## Client-end（客户端）:
+```bash
+cd Server
+.venv/Scripts/python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
 
-- Front-end Code: Web by wzh（王哲颢）
-- Front-end UI Design: by hkx（胡可欣）
+启动后打开 **http://localhost:8000** 就是完整的工作台——前端页面和后端接口都由这一个进程提供，**不需要另外启动前端**。
 
-## Server-end（服务端）:
+## 三、让别人访问：公开链接（cloudflared 隧道，无需服务器/域名）
 
-- Back-end with Database : Java, Springboot by wzh（王哲颢）
-- Back-end with AI: Python, FastAPI by hxz（何贤哲）
+1. 确保后端已在 :8000 运行（见第二节）。
+2. 首次安装 cloudflared：
 
-## 致谢
-大家认真投入到项目研究中，每个队员都特别给力！
-![](./GithubPage/group.png)
+   ```bash
+   winget install --id Cloudflare.cloudflared
+   ```
 
-我们的队伍组成如下:
-![Our Team](./GithubPage/OurTeam.jpg)
+3. 新开一个终端，启动隧道：
 
+   ```bash
+   "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel --url http://localhost:8000
+   ```
+
+4. 输出里形如 `https://xxx.trycloudflare.com` 的那一行就是公开链接，发给别人即可。
+
+> 链接是**临时**的：每次重启隧道会变化；你的电脑需保持开机、两个终端都别关。
+> 本机受 Clash/Mihomo 等代理影响，自己浏览器打开可能不稳，建议用手机流量测试或直接让访客访问。
+
+需要**永久**域名/正式部署（Render、云服务器）时，另行配置，见 [Spec.md](./Spec.md)。
+
+## 四、只有改前端代码时才需要碰（平时请跳过）
+
+```bash
+# 场景 A：改了前端代码，要让改动生效
+#   → 重新构建，产物交给后端托管，然后重启后端（第二节的命令）
+cd frontend && npm run build && rm -rf ../Server/static/* && cp -r dist/* ../Server/static/
+
+# 场景 B：开发调试前端（:5173，改代码热更新，自动代理 /api 到 :8000）
+#   → 此时需要两个进程：一个跑后端，一个跑 npm run dev，打开 http://localhost:5173
+cd frontend && npm run dev
+```
+
+## 五、结束程序
+
+前台运行的窗口按 **Ctrl+C** 即可停止；**直接关掉窗口也可以**——关闭控制台窗口会终止其中运行的进程。
+
+若进程残留、端口被占（如重启后端时报 8000 被占用）：
+
+```bash
+netstat -ano | grep :8000       # 记下最后一行的 PID（第 5 列）
+taskkill //F //PID <PID>        # Git Bash 需双斜杠；PowerShell 用 taskkill /F /PID <PID>
+```
+
+## 六、注意事项
+
+- 图片临时存放于 `Server/storage/`（TTL 1h，服务启动时清空）；多轮看图上下文存在后端内存中，重启即失——这是"无数据库"设计的固有行为。
+- `API's Usage/`、`Server/.env`、`Server/storage/` 均已 gitignore，不要手动加入提交。
+
+---
+
+**致谢**：前端开发 王哲颢 · 前端 UI 设计 胡可欣 · 后端（Java）王哲颢 · 后端（AI）何贤哲。

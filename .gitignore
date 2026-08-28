@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 密钥与本地配置（切勿提交）
+.env
+Server/.env
+*.env.local
+
+# 运行时临时数据
+Server/storage/
+tmp_images/
+
+# 本地 API 手册（含真实密钥，仅本地参考）
+API's Usage/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
