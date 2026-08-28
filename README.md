@@ -3,7 +3,7 @@
 多智能体 AIGC 对话工作台：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」。
 无本地推理、无数据库，仅前端 + 后端两层。详细设计见 [Spec.md](./Spec.md)。
 
-> **记住一句话：网站由后端托管，日常使用只需启动后端；前端只在改代码时才需要碰。**
+> **网站由后端托管，日常使用只需启动后端；前端只在改代码时才需要碰。**
 
 | 层 | 选型 |
 |---|---|
@@ -11,7 +11,7 @@
 | 后端 | Python 3.10+ · FastAPI · Uvicorn · LangGraph |
 | 模型 | DeepSeek（路由 + 视觉 QA）· TokenHub `hy-image-v3`（文生图 + 线稿生图） |
 
-> 以下命令为 **Git Bash** 语法（Windows 自带 Git Bash 即可执行）。
+> 每条命令给出 **Git Bash** 与 **PowerShell** 两种写法，按你实际用的终端选一种。
 > 所有 API 密钥只放在 `Server/.env`（已 gitignore），切勿提交或外发。
 
 ---
@@ -23,7 +23,9 @@
 cd Server
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt
-cp .env.example .env          # 复制后填入 DEEPSEEK_API_KEY、TOKENHUB_API_KEY
+cp .env.example .env              # Git Bash：复制模板
+Copy-Item .env.example .env       # PowerShell：复制模板（选一行）
+# 复制后填入 DEEPSEEK_API_KEY、TOKENHUB_API_KEY
 
 # 前端依赖
 cd ../frontend
@@ -51,7 +53,11 @@ cd Server
 3. 新开一个终端，启动隧道：
 
    ```bash
+   # Git Bash
    "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel --url http://localhost:8000
+
+   # PowerShell（带空格的路径前面必须加 &）
+   & "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel --url http://localhost:8000
    ```
 
 4. 输出里形如 `https://xxx.trycloudflare.com` 的那一行就是公开链接，发给别人即可。
@@ -66,11 +72,25 @@ cd Server
 ```bash
 # 场景 A：改了前端代码，要让改动生效
 #   → 重新构建，产物交给后端托管，然后重启后端（第二节的命令）
+
+# Git Bash
 cd frontend && npm run build && rm -rf ../Server/static/* && cp -r dist/* ../Server/static/
+
+# PowerShell（5.1 不支持 &&，逐行执行）
+cd frontend
+npm run build
+Remove-Item -Recurse -Force ..\Server\static\*
+Copy-Item -Recurse dist\* ..\Server\static\
 
 # 场景 B：开发调试前端（:5173，改代码热更新，自动代理 /api 到 :8000）
 #   → 此时需要两个进程：一个跑后端，一个跑 npm run dev，打开 http://localhost:5173
+
+# Git Bash
 cd frontend && npm run dev
+
+# PowerShell
+cd frontend
+npm run dev
 ```
 
 ## 五、结束程序
@@ -80,8 +100,13 @@ cd frontend && npm run dev
 若进程残留、端口被占（如重启后端时报 8000 被占用）：
 
 ```bash
+# Git Bash
 netstat -ano | grep :8000       # 记下最后一行的 PID（第 5 列）
-taskkill //F //PID <PID>        # Git Bash 需双斜杠；PowerShell 用 taskkill /F /PID <PID>
+taskkill //F //PID <PID>        # Git Bash 的双斜杠是转义
+
+# PowerShell
+netstat -ano | findstr :8000    # 记下最后一行的 PID
+taskkill /F /PID <PID>
 ```
 
 ## 六、注意事项
@@ -91,4 +116,4 @@ taskkill //F //PID <PID>        # Git Bash 需双斜杠；PowerShell 用 taskkil
 
 ---
 
-**致谢**：前端开发 王哲颢 · 前端 UI 设计 胡可欣 · 后端（Java）王哲颢 · 后端（AI）何贤哲。
+**致谢**：前端开发 王哲颢 · 前端 UI 设计 胡可欣 · 后端（AI）何贤哲 · 项目宣传册 章露瑶
