@@ -16,11 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import auth
 import config
+import db
 import media
 import schemas
 from agents.supervisor import run_supervisor
-from errors import AppError, FileMissingError, NotFoundError, UnsupportedImageTypeError
+from errors import (AppError, AuthTokenError, BadRequestError,
+                    CredentialsFormatError, FileMissingError, ForbiddenError,
+                    LoginFailedError, LoginRateLimitedError, NotFoundError,
+                    UnsupportedImageTypeError, UserNotFoundError)
 from logging_setup import configure_logging
 from task_queue import Task, TaskQueue
 
@@ -116,6 +121,11 @@ async def _janitor(queue: TaskQueue, store: ThreadStore) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    try:
+        db.init_db()                          # 建表 + 首次启动自动建初始管理员
+    except RuntimeError as exc:
+        logger.error(str(exc), extra={"event": "auth.db_init_failed"})
+        raise
     media.cleanup_all()                       # 启动时清空 storage/
 
     store = ThreadStore()
@@ -140,6 +150,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- 统一鉴权中间件（Spec2 §6.2）----------
+
+# 放行列表：除登录外，所有 /api 接口都需登录态
+PUBLIC_AUTH_PATHS = {"/api/auth/login"}
+
+
+def _bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return ""
+
+
+def _auth_reject(request: Request, code: int, message: str,
+                 status_code: int) -> JSONResponse:
+    logger.warning(message, extra={
+        "event": "auth.rejected",
+        "request_id": request.headers.get("x-request-id"),
+    })
+    return JSONResponse(status_code=status_code,
+                        content={"code": code, "message": message, "data": None})
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    # CORS 预检放行（由 CORSMiddleware 处理 OPTIONS）
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/") and path not in PUBLIC_AUTH_PATHS:
+        token = _bearer_token(request)
+        if not token:
+            return _auth_reject(request, 40103, "缺少登录态", 401)
+        try:
+            payload = auth.decode_token(token)
+        except AuthTokenError as exc:
+            return _auth_reject(request, 40103, exc.message, 401)
+        # 实时查库取最新 is_admin（撤销管理员即时生效）
+        user = db.get_user_by_id(payload["user_id"])
+        if user is None:
+            return _auth_reject(request, 40103, "登录态无效", 401)
+        request.state.user = {
+            "id": user["id"],
+            "username": user["username"],
+            "is_admin": user["is_admin"],
+        }
+        if path.startswith("/api/admin/"):
+            if not user["is_admin"]:
+                return _auth_reject(request, 40301, "无权限：仅管理员可访问", 403)
+    return await call_next(request)
 
 
 # ---------- 异常处理 ----------
@@ -242,6 +304,127 @@ async def get_task(task_id: int, request: Request):
 async def get_thread_messages(thread_id: str, request: Request):
     store: ThreadStore = request.app.state.thread_store
     return _ok({"messages": await store.get(thread_id)})
+
+
+# ---------- 认证 / 用户管理（Spec2 §6）----------
+
+@app.post("/api/auth/login")
+async def login(payload: schemas.LoginRequest, request: Request,
+                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    request_id = _request_id(x_request_id)
+    ip = auth.client_ip(request)
+    username = (payload.username or "").strip()
+    password = payload.password or ""
+
+    if auth.is_login_blocked(ip):
+        logger.warning("登录过于频繁", extra={
+            "event": "auth.login_failed", "request_id": request_id, "username": username,
+        })
+        raise LoginRateLimitedError()
+    if not username or not password:
+        raise CredentialsFormatError("用户名和密码不能为空")
+
+    user = db.get_user_by_username(username)
+    if user is None or not auth.verify_password(password, user["password_hash"]):
+        auth.record_login_failure(ip)
+        logger.warning("登录失败", extra={
+            "event": "auth.login_failed", "request_id": request_id, "username": username,
+        })
+        raise LoginFailedError()
+
+    auth.reset_login_failures(ip)
+    token = auth.create_token(user["id"], user["username"])
+    logger.info("登录成功", extra={
+        "event": "auth.login_success", "request_id": request_id, "username": user["username"],
+    })
+    return _ok({"token": token, "username": user["username"], "is_admin": user["is_admin"]})
+
+
+@app.get("/api/auth/me")
+async def me(request: Request):
+    user = request.state.user
+    return _ok({"username": user["username"], "is_admin": user["is_admin"]})
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Request,
+                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    request_id = _request_id(x_request_id)
+    operator = request.state.user
+    username = (payload.username or "").strip()
+    password = payload.password or ""
+    if len(username) < 2:
+        raise CredentialsFormatError("用户名至少 2 个字符")
+    if len(password) < 6:
+        raise CredentialsFormatError("密码至少 6 位")
+    user = db.create_user(username, auth.hash_password(password), is_admin=False)
+    logger.info("创建账号", extra={
+        "event": "auth.admin.create_user", "request_id": request_id,
+        "username": operator["username"], "target_user": user["username"],
+    })
+    return _ok({"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]})
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    return _ok(db.list_users())
+
+
+@app.put("/api/admin/users/{user_id}/password")
+async def admin_reset_password(user_id: int, payload: schemas.AdminResetPasswordRequest,
+                               request: Request,
+                               x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    request_id = _request_id(x_request_id)
+    operator = request.state.user
+    password = payload.password or ""
+    if len(password) < 6:
+        raise CredentialsFormatError("密码至少 6 位")
+    if db.get_user_by_id(user_id) is None:
+        raise UserNotFoundError("用户不存在")
+    db.update_password(user_id, auth.hash_password(password))
+    logger.info("重置密码", extra={
+        "event": "auth.admin.reset_password", "request_id": request_id,
+        "username": operator["username"], "target_user": str(user_id),
+    })
+    return _ok({"id": user_id})
+
+
+@app.put("/api/admin/users/{user_id}/admin")
+async def admin_set_admin(user_id: int, payload: schemas.AdminSetAdminRequest,
+                          request: Request,
+                          x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    request_id = _request_id(x_request_id)
+    operator = request.state.user
+    target = db.get_user_by_id(user_id)
+    if target is None:
+        raise UserNotFoundError("用户不存在")
+    db.set_admin(user_id, payload.is_admin)
+    logger.info("设置/撤销管理员", extra={
+        "event": "auth.admin.toggle_admin", "request_id": request_id,
+        "username": operator["username"], "target_user": target["username"],
+        "is_admin": payload.is_admin,
+    })
+    return _ok({"id": user_id})
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: int, request: Request,
+                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    request_id = _request_id(x_request_id)
+    operator = request.state.user
+    target = db.get_user_by_id(user_id)
+    if target is None:
+        raise UserNotFoundError("用户不存在")
+    if user_id == operator["id"]:
+        raise BadRequestError("不能删除自己")
+    if target["is_admin"] and db.count_admins() <= 1:
+        raise BadRequestError("不能删除最后一个管理员")
+    db.delete_user(user_id)
+    logger.info("删除账号", extra={
+        "event": "auth.admin.delete_user", "request_id": request_id,
+        "username": operator["username"], "target_user": target["username"],
+    })
+    return _ok({"id": user_id})
 
 
 # ---------- 静态托管 ----------

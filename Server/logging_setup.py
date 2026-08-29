@@ -15,7 +15,7 @@ class JsonFormatter(logging.Formatter):
     """把日志记录格式化为单行 JSON。"""
 
     _FIELDS = ("event", "request_id", "thread_id", "task_id",
-               "provider", "duration_ms", "kind")
+               "provider", "duration_ms", "kind", "username", "target_user")
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(

@@ -61,6 +61,54 @@ class NotFoundError(AppError):
         super().__init__(code, message, status_code=404)
 
 
+# ---- 认证 / 授权（Spec2 §9，追加到 Spec §9）----
+class CredentialsFormatError(AppError):
+    """用户名或密码格式非法（用户名 <2 字符 / 密码 <6 位）。"""
+
+    def __init__(self, message="用户名或密码格式非法"):
+        super().__init__(40010, message, status_code=400)
+
+
+class LoginFailedError(AppError):
+    """用户名或密码错误。"""
+
+    def __init__(self, message="用户名或密码错误"):
+        super().__init__(40102, message, status_code=401)
+
+
+class AuthTokenError(AppError):
+    """登录态缺失 / 无效 / 过期。"""
+
+    def __init__(self, message="登录态无效或已过期"):
+        super().__init__(40103, message, status_code=401)
+
+
+class ForbiddenError(AppError):
+    """无权限（非管理员访问管理接口）。"""
+
+    def __init__(self, message="无权限：仅管理员可访问"):
+        super().__init__(40301, message, status_code=403)
+
+
+class UserNotFoundError(NotFoundError):
+    def __init__(self, message="用户不存在"):
+        super().__init__(message, code=40402)
+
+
+class DuplicateUsernameError(AppError):
+    """用户名已存在。"""
+
+    def __init__(self, message="用户名已存在"):
+        super().__init__(40901, message, status_code=409)
+
+
+class LoginRateLimitedError(AppError):
+    """登录失败过于频繁（限速）。"""
+
+    def __init__(self, message="登录尝试过于频繁，请稍后再试"):
+        super().__init__(42901, message, status_code=429)
+
+
 class InternalError(AppError):
     def __init__(self, message="内部错误"):
         super().__init__(50001, message, status_code=500)

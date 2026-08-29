@@ -1,11 +1,14 @@
 import { defineStore } from 'pinia'
 import { getTask, sendChat, uploadImage } from '../api/chatApi'
 
-const STORAGE_KEY = 'artcn_chat_v2'
+// 历史键按用户名隔离：artcn_chat_v2:<username>（Spec3 §5.1）；旧的单一键 artcn_chat_v2 废弃不再读写
+function chatKey(username) {
+  return `artcn_chat_v2:${username}`
+}
 
-function loadHistory() {
+function loadHistory(username) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(chatKey(username))
     if (raw) {
       const saved = JSON.parse(raw)
       return { threadId: saved.threadId || null, messages: saved.messages || [] }
@@ -24,21 +27,30 @@ function nextId(prefix = 'm') {
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
+    username: '', // 当前历史归属用户（Spec3），未登录为空串 → 不读不写历史键
     threadId: null,
     messages: [],
     sending: false
   }),
 
   actions: {
-    init() {
-      const saved = loadHistory()
-      this.threadId = saved.threadId
-      this.messages = saved.messages
+    // 用户切换时重载历史：登录 / 登出 / token 失效由 App.vue 触发（Spec3 §5.2）
+    resetForUser(username) {
+      this.username = username || ''
+      this.threadId = null
+      this.messages = []
+      this.sending = false
+      if (this.username) {
+        const saved = loadHistory(this.username)
+        this.threadId = saved.threadId
+        this.messages = saved.messages
+      }
     },
 
     persist() {
+      if (!this.username) return // 未登录不读写历史键（Spec3 §5.1）
       localStorage.setItem(
-        STORAGE_KEY,
+        chatKey(this.username),
         JSON.stringify({ threadId: this.threadId, messages: this.messages })
       )
     },

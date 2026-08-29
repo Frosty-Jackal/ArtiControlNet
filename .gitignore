@@ -11,6 +11,11 @@ Server/.env
 Server/storage/
 tmp_images/
 
+# 本地认证数据库（含 WAL/SHM 伴生文件）
+Server/artcn.db
+Server/artcn.db-wal
+Server/artcn.db-shm
+
 # 本地 API 手册（含真实密钥，仅本地参考）
 API's Usage/
 

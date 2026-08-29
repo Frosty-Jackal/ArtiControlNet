@@ -59,3 +59,36 @@ class ThreadMessage(BaseModel):
 
 class ThreadOut(BaseModel):
     messages: list[ThreadMessage]
+
+
+# ---- 认证 / 用户管理（Spec2 §6）----
+
+class LoginRequest(BaseModel):
+    """POST /api/auth/login 请求体。格式校验在路由层完成（错误码 40010）。"""
+
+    username: str
+    password: str
+
+
+class LoginOut(BaseModel):
+    token: str
+    username: str
+    is_admin: bool
+
+
+class MeOut(BaseModel):
+    username: str
+    is_admin: bool
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AdminResetPasswordRequest(BaseModel):
+    password: str
+
+
+class AdminSetAdminRequest(BaseModel):
+    is_admin: bool
