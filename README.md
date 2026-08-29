@@ -1,7 +1,7 @@
 # ArtiControlNet 运行说明书
 
-多智能体 AIGC 对话工作台：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」。
-无本地推理、无数据库，仅前端 + 后端两层。详细设计见 [Spec.md](./specs/Spec.md)。
+多智能体 AIGC 对话工作台：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」等任务。
+仅前端 + 后端两层（登录账号存本地 SQLite `artcn.db`）。详细设计见 [Spec.md](./specs/Spec.md)。
 
 > **网站由后端托管，日常使用只需启动后端；前端只在改代码时才需要碰。**
 
@@ -111,7 +111,7 @@ taskkill /F /PID <PID>
 
 ## 六、注意事项
 
-- 图片临时存放于 `Server/storage/`（TTL 1h，服务启动时清空）；多轮看图上下文存在后端内存中，重启即失——这是"无数据库"设计的固有行为。
+- 图片临时存放于 `Server/storage/`（TTL 1h，服务启动时清空）；多轮看图上下文存在后端内存中，重启即失（内存态，不落库）。
 - `API's Usage/`、`Server/.env`、`Server/storage/` 均已 gitignore，不要手动加入提交。
 
 ---
