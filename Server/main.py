@@ -48,6 +48,24 @@ def _ok(data=None, message: str = "ok") -> dict:
     return {"code": 200, "message": message, "data": data}
 
 
+# ---------- 使用统计归类（Spec4 §5.3） ----------
+
+# Supervisor 打上的工具标签 → 统计类别；无标签 = 纯文本对话。
+_TOOL_CATEGORY = {
+    "generate_image": "generate",
+    "edit_image": "edit",
+    "qa_image": "qa",
+}
+
+
+def _usage_category(result: dict) -> str | None:
+    """按 result["tool"] 归类；未知工具标签不计数（返回 None）。"""
+    tool = result.get("tool")
+    if tool is None:
+        return "chat"
+    return _TOOL_CATEGORY.get(tool)
+
+
 # ---------- 会话历史（内存，仅用于路由上下文）----------
 
 class ThreadStore:
@@ -95,6 +113,12 @@ def _make_handler(store: ThreadStore):
                 "role": "assistant", "text": "（已生成图片）",
                 "images": result.get("images") or [],
             })
+        # 成功路径：按工具标签累计使用统计（Spec4 §5.2）；失败/超时/排队被拒不计
+        category = _usage_category(result)
+        if category:
+            user_id = request.get("user_id")
+            if user_id is not None:
+                db.record_call(user_id, category)
         return result
 
     return handle_task
@@ -256,6 +280,7 @@ async def create_chat(payload: schemas.ChatRequest, request: Request,
             "thread_id": thread_id,
             "public_base": _public_base(request),
             "request_id": request_id,
+            "user_id": request.state.user["id"],   # 统计归属（Spec4 §5.2）
         },
     )
     # 记录用户消息（供后续路由上下文）
@@ -425,6 +450,12 @@ async def admin_delete_user(user_id: int, request: Request,
         "username": operator["username"], "target_user": target["username"],
     })
     return _ok({"id": user_id})
+
+
+@app.get("/api/admin/stats")
+async def admin_stats(request: Request):
+    """4 类调用聚合统计（只读；鉴权由统一中间件对 /api/admin/* 限管理员，Spec4 §6.2）。"""
+    return _ok(db.get_usage_stats())
 
 
 # ---------- 静态托管 ----------

@@ -113,4 +113,11 @@ export async function deleteUser(userId) {
   return data.data // { id }
 }
 
+// ---- 使用统计（Spec4 §6.1）----
+
+export async function getUsageStats() {
+  const { data } = await http.get('/api/admin/stats')
+  return data.data // { user_count, total_calls, totals, per_user_avg, shares }
+}
+
 export { API_BASE }

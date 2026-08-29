@@ -106,6 +106,9 @@ async def tool_node(state: AgentState) -> AgentState:
         result = await qa.run(args)
     else:
         raise RouterError(f"未知工具: {name}")
+    # 打上工具标签：子 Agent 返回的 kind 无法区分「文生图/图文生图」（都是 images）
+    # 与「对话/图像QA」（都是 text），统计据此归类（Spec4 §2.1）。
+    result["tool"] = name
     return {"result": result}
 
 

@@ -18,13 +18,17 @@
       <button v-if="auth.isAdmin" class="btn-clear" @click="toggleAdmin">
         {{ showAdmin ? '返回聊天' : '用户管理' }}
       </button>
-      <button v-if="!showAdmin" class="btn-clear" title="清空当前对话" @click="onClear">
+      <button v-if="auth.isAdmin" class="btn-clear" @click="toggleStats">
+        {{ showStats ? '返回聊天' : '数据统计' }}
+      </button>
+      <button v-if="!showAdmin && !showStats" class="btn-clear" title="清空当前对话" @click="onClear">
         清空
       </button>
       <button class="btn-logout" title="退出登录" @click="onLogout">退出</button>
     </header>
 
     <AdminPanel v-if="showAdmin" @close="showAdmin = false" />
+    <StatsPanel v-else-if="showStats" @close="showStats = false" />
 
     <template v-else>
       <main class="chat-scroll" ref="scrollRef">
@@ -57,6 +61,7 @@ import ChatInput from './components/ChatInput.vue'
 import TypingIndicator from './components/TypingIndicator.vue'
 import Login from './views/Login.vue'
 import AdminPanel from './views/AdminPanel.vue'
+import StatsPanel from './views/StatsPanel.vue'
 
 const auth = useAuthStore()
 auth.init()
@@ -76,15 +81,25 @@ watch(
 )
 
 const showAdmin = ref(false)
+const showStats = ref(false)
+// 「用户管理」与「数据统计」互斥（Spec4 §7）：打开一个自动关闭另一个
 function toggleAdmin() {
   showAdmin.value = !showAdmin.value
+  if (showAdmin.value) showStats.value = false
+}
+function toggleStats() {
+  showStats.value = !showStats.value
+  if (showStats.value) showAdmin.value = false
 }
 
 // 撤销自身管理员 → 自动关闭管理视图
 watch(
   () => auth.isAdmin,
   (v) => {
-    if (!v) showAdmin.value = false
+    if (!v) {
+      showAdmin.value = false
+      showStats.value = false
+    }
   }
 )
 
@@ -92,11 +107,13 @@ watch(
 window.addEventListener('artcn:unauthorized', () => {
   auth.logout()
   showAdmin.value = false
+  showStats.value = false
 })
 
 function onLogout() {
   auth.logout()
   showAdmin.value = false
+  showStats.value = false
 }
 
 const scrollRef = ref(null)

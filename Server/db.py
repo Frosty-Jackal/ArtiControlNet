@@ -27,6 +27,21 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """
 
+# 4 类调用计数表（Spec4 §5.4）：每用户一行，任务成功完成后 +1。
+_CREATE_USAGE_TABLE = """
+CREATE TABLE IF NOT EXISTS usage (
+    user_id    INTEGER PRIMARY KEY,
+    chat       INTEGER NOT NULL DEFAULT 0,
+    generate   INTEGER NOT NULL DEFAULT 0,
+    edit       INTEGER NOT NULL DEFAULT 0,
+    qa         INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+)
+"""
+
+# 计数列白名单（record_call 据此拼列名，绝不拼接外部输入）
+_USAGE_CATEGORIES = ("chat", "generate", "edit", "qa")
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -58,6 +73,7 @@ def init_db() -> None:
     with _connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(_CREATE_TABLE)
+        conn.execute(_CREATE_USAGE_TABLE)
         conn.commit()
     if count_users() > 0:
         return
@@ -153,7 +169,73 @@ def set_admin(user_id: int, is_admin: bool) -> bool:
 
 
 def delete_user(user_id: int) -> bool:
+    """删除用户；连带删除其 usage 计数行，保证统计口径一致（Spec4 §3）。"""
     with _connect() as conn:
+        conn.execute("DELETE FROM usage WHERE user_id = ?", (user_id,))
         cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
     return cur.rowcount > 0
+
+
+# ---------- 使用统计（Spec4） ----------
+
+def record_call(user_id: int, category: str) -> None:
+    """任务成功完成后累计一次调用（UPSERT，首次调用即计 1）。
+
+    新行各列插 0、目标列插 1；已存在行用 excluded 增量累加，避免首次调用被吞。
+    category 取自固定白名单；列名均为静态字面量，不拼接外部输入。
+    """
+    if category not in _USAGE_CATEGORIES:
+        raise ValueError(f"未知统计类别: {category}")
+    values = {c: (1 if c == category else 0) for c in _USAGE_CATEGORIES}
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO usage (user_id, chat, generate, edit, qa, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "chat = chat + excluded.chat, "
+            "generate = generate + excluded.generate, "
+            "edit = edit + excluded.edit, "
+            "qa = qa + excluded.qa, "
+            "updated_at = excluded.updated_at",
+            (user_id, values["chat"], values["generate"], values["edit"],
+             values["qa"], now),
+        )
+        conn.commit()
+
+
+def get_usage_stats() -> dict:
+    """聚合统计（管理员只读）：4 类总数 / 注册人数 / 人均 / 占比。
+
+    - user_count = users 表当前注册人数（含 0 次调用者）。
+    - 人均 = 各类总数 ÷ user_count；占比 = 各类总数 ÷ 总调用 × 100。
+    - 分母为 0 时对应项全部取 0。
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(chat), 0)     AS chat, "
+            "       COALESCE(SUM(generate), 0) AS generate, "
+            "       COALESCE(SUM(edit), 0)     AS edit, "
+            "       COALESCE(SUM(qa), 0)       AS qa "
+            "FROM usage"
+        ).fetchone()
+        user_count = int(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"])
+
+    totals = {c: int(row[c]) for c in _USAGE_CATEGORIES}
+    total_calls = sum(totals.values())
+    per_user_avg = {
+        c: round(totals[c] / user_count, 1) if user_count else 0.0
+        for c in _USAGE_CATEGORIES
+    }
+    shares = {
+        c: round(totals[c] / total_calls * 100, 1) if total_calls else 0.0
+        for c in _USAGE_CATEGORIES
+    }
+    return {
+        "user_count": user_count,
+        "total_calls": total_calls,
+        "totals": totals,
+        "per_user_avg": per_user_avg,
+        "shares": shares,
+    }
