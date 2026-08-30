@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 # ===== 路径 =====
 BASE_DIR = Path(__file__).resolve().parent
 STORAGE_DIR = BASE_DIR / "storage"          # 临时图片目录（/images 静态挂载，TTL 1h）
+GALLERY_DIR = BASE_DIR / "gallery"          # 个人作品库持久目录（Spec5，与 storage/ 无关）
 STATIC_DIR = BASE_DIR / "static"            # 生产环境挂载 frontend/dist
 
 load_dotenv(BASE_DIR / ".env")
@@ -56,6 +57,7 @@ TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "300"))
 THREAD_HISTORY_LIMIT = int(os.getenv("THREAD_HISTORY_LIMIT", "20"))
 TERMINAL_TASK_TTL_SECONDS = 3600         # 终态任务保留时长
 JANITOR_INTERVAL_SECONDS = 300           # 清理巡检间隔
+PENDING_INTENT_TTL_SECONDS = 1800        # 挂起意图有效期（Spec5 §5.5，到期视为新会话）
 
 # ===== 图片 / 上传 =====
 UPLOAD_MAX_BYTES = 10 * 1024 * 1024          # 上传 ≤10MB
@@ -69,4 +71,5 @@ IMAGE_TTL_SECONDS = 3600                     # storage 文件 TTL 1h
 
 # 启动时确保目录存在
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+GALLERY_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)

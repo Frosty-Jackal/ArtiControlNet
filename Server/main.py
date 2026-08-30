@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
@@ -13,12 +14,13 @@ from typing import Optional
 from fastapi import FastAPI, File, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import auth
 import config
 import db
+import gallery
 import media
 import schemas
 from agents.supervisor import run_supervisor
@@ -85,24 +87,96 @@ class ThreadStore:
             return list(q) if q else []
 
 
+# ---------- 挂起意图（Spec5 §5.5，内存，按 thread_id）----------
+
+class PendingStore:
+    """多轮追问的挂起意图存储：仅内存，重启即丢（作者拍板，Spec5 §2 决策记录）。
+
+    - 生命周期：交付真实工具 → 清；结果为非 clarify → 清；超时 → 访问时清，视为新会话。
+    - 并发安全：asyncio.Lock（与 ThreadStore 同级）。
+    """
+
+    def __init__(self, ttl: float = config.PENDING_INTENT_TTL_SECONDS):
+        self._pending: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+        self._ttl = ttl
+
+    async def get(self, thread_id: str) -> Optional[dict]:
+        """取挂起意图；超过 TTL 视为过期，清除并返回 None。"""
+        async with self._lock:
+            p = self._pending.get(thread_id)
+            if p is None:
+                return None
+            if time.time() - p.get("created_at", 0) > self._ttl:
+                self._pending.pop(thread_id, None)
+                return None
+            return dict(p)
+
+    async def set(self, thread_id: str, pending: dict) -> None:
+        async with self._lock:
+            pending["created_at"] = time.time()
+            self._pending[thread_id] = pending
+
+    async def clear(self, thread_id: str) -> bool:
+        async with self._lock:
+            return self._pending.pop(thread_id, None) is not None
+
+
 # ---------- Worker 处理器 ----------
 
-def _make_handler(store: ThreadStore):
+def _make_handler(store: ThreadStore, pending_store: PendingStore):
     async def handle_task(task: Task) -> dict:
         request = task.request
         try:
+            # 挂起意图存在 → 注入本轮请求（含 TTL 检查；过期当无）
+            pending = await pending_store.get(task.thread_id)
+            if pending:
+                request = {**request, "pending": pending}
             result = await run_supervisor(request, await store.get(task.thread_id),
                                           task.request_id)
         except AppError as exc:
+            # 失败即作废挂起意图（Spec7 §5.3）：重试所需上下文由会话历史兜底
+            await pending_store.clear(task.thread_id)
             await store.append(task.thread_id, {
                 "role": "assistant", "text": f"（任务失败：{exc.message}）",
             })
             raise
         except Exception as exc:  # noqa: BLE001
+            await pending_store.clear(task.thread_id)   # 同上
             await store.append(task.thread_id, {
                 "role": "assistant", "text": f"（任务失败：{exc}）",
             })
             raise
+
+        # 追问：结果为 clarify → 写入/覆盖挂起意图，并把追问文案作为普通文本返回（Spec5 §5.2）
+        # missing 一并挂起，供下一轮主 Agent 知道还缺哪些参数（Spec6 §5.1）。
+        if result.get("kind") == "clarify":
+            intent = result.get("intent")
+            question = result.get("question") or ""
+            missing = result.get("missing") or []
+            image_url = result.get("image_url") or (pending or {}).get("image_url")
+            await pending_store.set(task.thread_id, {
+                "intent": intent, "image_url": image_url, "question": question,
+                "missing": missing,
+            })
+            result = {"kind": "text", "text": question}
+            await store.append(task.thread_id, {
+                "role": "assistant", "text": question,
+            })
+            logger.info("发起追问", extra={
+                "event": "clarify.asked", "thread_id": task.thread_id,
+                "intent": intent,
+            })
+            return result
+
+        # 非追问 → 清挂起意图（交付完成 / 用户开新话题，Spec5 §5.2）
+        cleared = await pending_store.clear(task.thread_id)
+        if cleared:
+            logger.info("挂起意图已交付/清除", extra={
+                "event": "clarify.resolved", "thread_id": task.thread_id,
+                "intent": (pending or {}).get("intent"),
+            })
+
         # 记录助手结果到会话历史
         if result.get("kind") == "text":
             await store.append(task.thread_id, {
@@ -154,7 +228,9 @@ async def lifespan(app: FastAPI):
 
     store = ThreadStore()
     app.state.thread_store = store
-    app.state.queue = TaskQueue(_make_handler(store))
+    pending_store = PendingStore()
+    app.state.pending_store = pending_store
+    app.state.queue = TaskQueue(_make_handler(store, pending_store))
     await app.state.queue.start()
     app.state.janitor = asyncio.create_task(_janitor(app.state.queue, store))
 
@@ -303,6 +379,8 @@ async def upload_image(request: Request, file: UploadFile = File(...),
         raise UnsupportedImageTypeError(f"不支持的图片格式: {file.content_type}")
     ext = media.validate_upload(data)                  # 40002 / 40003 / 40004
     url = media.save_upload(data, _public_base(request), ext)
+    # 上传即入库：除临时 storage/ 外，额外持久化到个人作品库（Spec5 §5.2 链路 1）
+    gallery.save_gallery_image(data, request.state.user["id"], "upload", None)
     logger.info(f"图片上传成功: {url}", extra={
         "event": "image.uploaded", "request_id": request_id,
     })
@@ -329,6 +407,40 @@ async def get_task(task_id: int, request: Request):
 async def get_thread_messages(thread_id: str, request: Request):
     store: ThreadStore = request.app.state.thread_store
     return _ok({"messages": await store.get(thread_id)})
+
+
+# ---------- 个人作品库（Spec5 §6.1）----------
+
+@app.get("/api/gallery")
+async def list_gallery(request: Request, source: str = ""):
+    """本人作品列表（时间倒序），可 ?source=upload|generate|edit 筛选。鉴权由统一中间件。"""
+    user = request.state.user
+    items = gallery.list_user_images(user["id"], source or None)
+    return _ok({"items": items})
+
+
+@app.get("/api/gallery/{item_id}/file")
+async def gallery_file(item_id: int, request: Request, download: bool = False):
+    """查看原图：带 token 拉取（<img> 无法带 Authorization 头，前端用 blob 渲染）。
+
+    ?download=1 → Content-Disposition: attachment（触发浏览器保存）。
+    非本人 / 不存在 → 404（40403）。
+    """
+    user = request.state.user
+    record, data = gallery.read_gallery_file(item_id, user["id"])
+    media_type = gallery.mime_for(record)
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{record["file_name"]}"'
+    return Response(content=data, media_type=media_type, headers=headers)
+
+
+@app.delete("/api/gallery/{item_id}")
+async def delete_gallery_item(item_id: int, request: Request):
+    """删除本人作品：记录 + gallery/ 物理文件一并删除。"""
+    user = request.state.user
+    gallery.delete_item(item_id, user["id"])
+    return _ok({"id": item_id})
 
 
 # ---------- 认证 / 用户管理（Spec2 §6）----------
@@ -444,6 +556,8 @@ async def admin_delete_user(user_id: int, request: Request,
         raise BadRequestError("不能删除自己")
     if target["is_admin"] and db.count_admins() <= 1:
         raise BadRequestError("不能删除最后一个管理员")
+    # 级联删除作品：gallery/ 物理文件 + images 记录（Spec5 §3），随后 db 侧清 usage/images/users
+    gallery.delete_user_gallery(user_id)
     db.delete_user(user_id)
     logger.info("删除账号", extra={
         "event": "auth.admin.delete_user", "request_id": request_id,

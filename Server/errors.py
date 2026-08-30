@@ -95,6 +95,13 @@ class UserNotFoundError(NotFoundError):
         super().__init__(message, code=40402)
 
 
+class GalleryItemNotFoundError(NotFoundError):
+    """作品不存在或不属于当前用户（Spec5 §9）：越权访问他人作品也返回 404，不泄露存在性。"""
+
+    def __init__(self, message="作品不存在或不属于当前用户"):
+        super().__init__(message, code=40403)
+
+
 class DuplicateUsernameError(AppError):
     """用户名已存在。"""
 

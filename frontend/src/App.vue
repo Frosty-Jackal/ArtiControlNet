@@ -15,19 +15,23 @@
       <span class="brand-sub">
         多智能体 AI 创意工作台 · {{ auth.username }}
       </span>
+      <button class="btn-clear" @click="toggleGallery">
+        {{ showGallery ? '返回聊天' : '我的作品' }}
+      </button>
       <button v-if="auth.isAdmin" class="btn-clear" @click="toggleAdmin">
         {{ showAdmin ? '返回聊天' : '用户管理' }}
       </button>
       <button v-if="auth.isAdmin" class="btn-clear" @click="toggleStats">
         {{ showStats ? '返回聊天' : '数据统计' }}
       </button>
-      <button v-if="!showAdmin && !showStats" class="btn-clear" title="清空当前对话" @click="onClear">
+      <button v-if="!showAdmin && !showStats && !showGallery" class="btn-clear" title="清空当前对话" @click="onClear">
         清空
       </button>
       <button class="btn-logout" title="退出登录" @click="onLogout">退出</button>
     </header>
 
-    <AdminPanel v-if="showAdmin" @close="showAdmin = false" />
+    <GalleryPanel v-if="showGallery" @close="showGallery = false" />
+    <AdminPanel v-else-if="showAdmin" @close="showAdmin = false" />
     <StatsPanel v-else-if="showStats" @close="showStats = false" />
 
     <template v-else>
@@ -62,6 +66,7 @@ import TypingIndicator from './components/TypingIndicator.vue'
 import Login from './views/Login.vue'
 import AdminPanel from './views/AdminPanel.vue'
 import StatsPanel from './views/StatsPanel.vue'
+import GalleryPanel from './views/GalleryPanel.vue'
 
 const auth = useAuthStore()
 auth.init()
@@ -80,16 +85,30 @@ watch(
   { immediate: true }
 )
 
+const showGallery = ref(false)
 const showAdmin = ref(false)
 const showStats = ref(false)
-// 「用户管理」与「数据统计」互斥（Spec4 §7）：打开一个自动关闭另一个
+// 「我的作品」所有登录用户可见（Spec5 §7）；三面板互斥：打开一个自动关闭另外两个
+function toggleGallery() {
+  showGallery.value = !showGallery.value
+  if (showGallery.value) {
+    showAdmin.value = false
+    showStats.value = false
+  }
+}
 function toggleAdmin() {
   showAdmin.value = !showAdmin.value
-  if (showAdmin.value) showStats.value = false
+  if (showAdmin.value) {
+    showStats.value = false
+    showGallery.value = false
+  }
 }
 function toggleStats() {
   showStats.value = !showStats.value
-  if (showStats.value) showAdmin.value = false
+  if (showStats.value) {
+    showAdmin.value = false
+    showGallery.value = false
+  }
 }
 
 // 撤销自身管理员 → 自动关闭管理视图
@@ -106,12 +125,14 @@ watch(
 // 任意业务请求 401（token 失效）→ 清登录态回登录页
 window.addEventListener('artcn:unauthorized', () => {
   auth.logout()
+  showGallery.value = false
   showAdmin.value = false
   showStats.value = false
 })
 
 function onLogout() {
   auth.logout()
+  showGallery.value = false
   showAdmin.value = false
   showStats.value = false
 }

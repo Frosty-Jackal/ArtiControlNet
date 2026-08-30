@@ -95,16 +95,15 @@ export const useChatStore = defineStore('chat', {
       this.sending = false
     },
 
-    // 失败气泡重试
+    // 失败气泡重试（Spec7 §5.2：复用 errorId 作为气泡 id，完成/失败回调才能替换到气泡）
     async retry(errorId) {
       const err = this.messages.find((m) => m.id === errorId)
       if (!err || !err.request) return
       this.sending = true
-      const pendingId = nextId('p')
       const request = err.request
-      this.replaceMessage(errorId, { id: pendingId, role: 'assistant', kind: 'pending', request })
+      this.replaceMessage(errorId, { id: errorId, role: 'assistant', kind: 'pending', request })
       this.persist()
-      await this.submit(request, pendingId)
+      await this.submit(request, errorId)
       this.sending = false
     },
 

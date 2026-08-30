@@ -42,6 +42,25 @@ CREATE TABLE IF NOT EXISTS usage (
 # 计数列白名单（record_call 据此拼列名，绝不拼接外部输入）
 _USAGE_CATEGORIES = ("chat", "generate", "edit", "qa")
 
+# 个人作品库表（Spec5 §5.3）：文件与元数据分离，文件字节在 Server/gallery/。
+_CREATE_IMAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS images (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    source     TEXT NOT NULL,
+    file_name  TEXT NOT NULL,
+    ext        TEXT NOT NULL,
+    prompt     TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+# 画廊按用户 + 时间倒序（Spec5 §5.3 索引）
+_CREATE_IMAGES_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_images_user_created "
+    "ON images(user_id, created_at DESC)"
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -65,6 +84,20 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
     }
 
 
+def _image_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "source": row["source"],
+        "file_name": row["file_name"],
+        "ext": row["ext"],
+        "prompt": row["prompt"],
+        "created_at": row["created_at"],
+    }
+
+
 # ---------- 生命周期 ----------
 
 def init_db() -> None:
@@ -74,6 +107,8 @@ def init_db() -> None:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(_CREATE_TABLE)
         conn.execute(_CREATE_USAGE_TABLE)
+        conn.execute(_CREATE_IMAGES_TABLE)
+        conn.execute(_CREATE_IMAGES_INDEX)
         conn.commit()
     if count_users() > 0:
         return
@@ -169,9 +204,14 @@ def set_admin(user_id: int, is_admin: bool) -> bool:
 
 
 def delete_user(user_id: int) -> bool:
-    """删除用户；连带删除其 usage 计数行，保证统计口径一致（Spec4 §3）。"""
+    """删除用户；连带删除其 usage 计数行与 images 记录，保证口径一致（Spec4 §3 / Spec5 §3）。
+
+    注意：仅删除数据库记录；gallery/ 下的物理文件由 gallery.delete_user_gallery 负责
+    （先取 file_name 列表再删文件），见 main.py admin_delete_user。
+    """
     with _connect() as conn:
         conn.execute("DELETE FROM usage WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM images WHERE user_id = ?", (user_id,))
         cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
     return cur.rowcount > 0
@@ -239,3 +279,59 @@ def get_usage_stats() -> dict:
         "per_user_avg": per_user_avg,
         "shares": shares,
     }
+
+
+# ---------- 个人作品库（Spec5 §5.3） ----------
+
+def add_image_record(user_id: int, source: str, file_name: str,
+                     ext: str, prompt: str | None) -> dict:
+    """写一条作品记录，返回完整记录 dict。"""
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO images (user_id, source, file_name, ext, prompt, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, source, file_name, ext, prompt, _now_iso()),
+        )
+        conn.commit()
+        image_id = cur.lastrowid
+    return get_image_record(image_id)
+
+
+def get_image_record(image_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM images WHERE id = ?", (image_id,)).fetchone()
+    return _image_row_to_dict(row)
+
+
+def list_image_records(user_id: int, source: str | None = None) -> list[dict]:
+    """按用户取作品记录，时间倒序；source 非空时按来源筛选。"""
+    if source:
+        sql = ("SELECT * FROM images WHERE user_id = ? AND source = ? "
+               "ORDER BY created_at DESC, id DESC")
+        params = (user_id, source)
+    else:
+        sql = ("SELECT * FROM images WHERE user_id = ? "
+               "ORDER BY created_at DESC, id DESC")
+        params = (user_id,)
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_image_row_to_dict(r) for r in rows]
+
+
+def delete_image_record(image_id: int) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM images WHERE id = ?", (image_id,))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_user_image_records(user_id: int) -> list[str]:
+    """删除某用户全部作品记录，返回被删记录的 file_name 列表（供删除物理文件）。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT file_name FROM images WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        names = [r["file_name"] for r in rows]
+        conn.execute("DELETE FROM images WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return names

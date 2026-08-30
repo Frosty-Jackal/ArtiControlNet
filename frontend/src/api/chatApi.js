@@ -32,6 +32,8 @@ http.interceptors.request.use((config) => {
 
 http.interceptors.response.use(
   (resp) => {
+    // 二进制响应（blob，画廊文件）直接放行，不按 JSON {code} 契约校验
+    if (resp.config.responseType === 'blob') return resp
     const body = resp.data
     if (body && body.code !== 200) {
       return Promise.reject(new Error(body.message || '请求失败'))
@@ -39,9 +41,23 @@ http.interceptors.response.use(
     return resp
   },
   (err) => {
-    const body = err.response?.data
+    const resp = err.response
+    const url = err.config?.url || ''
+    // blob 请求出错时错误体也是 Blob，需异步解析其中的 {code,message}
+    if (resp && err.config?.responseType === 'blob' && resp.data instanceof Blob) {
+      return resp.data.text().then((txt) => {
+        let msg = '请求失败'
+        try { msg = (JSON.parse(txt).message) || msg } catch (e) { /* 非 JSON 错误体 */ }
+        if (resp.status === 401 && !url.includes('/api/auth/login')) {
+          clearToken()
+          window.dispatchEvent(new Event('artcn:unauthorized'))
+        }
+        return Promise.reject(new Error(msg))
+      })
+    }
+    const body = resp?.data
     // 任意业务请求 401 → 清 token 回登录页（登录接口自身的 40102 不触发）
-    if (err.response?.status === 401 && !err.config?.url?.includes('/api/auth/login')) {
+    if (resp?.status === 401 && !url.includes('/api/auth/login')) {
       clearToken()
       window.dispatchEvent(new Event('artcn:unauthorized'))
     }
@@ -118,6 +134,27 @@ export async function deleteUser(userId) {
 export async function getUsageStats() {
   const { data } = await http.get('/api/admin/stats')
   return data.data // { user_count, total_calls, totals, per_user_avg, shares }
+}
+
+// ---- 个人作品库（Spec5 §6.1 / §7）----
+
+export async function listGallery(source = '') {
+  const { data } = await http.get('/api/gallery', { params: source ? { source } : {} })
+  return data.data // { items: [{ id, source, url, prompt, created_at }] }
+}
+
+// 返回 axios 响应：data 为 Blob。画廊文件需要 token，<img> 无法带 Authorization 头，
+// 前端用带 token 的 axios 拉 blob → objectURL 渲染 / 触发下载（Spec5 §3）。
+export function fetchGalleryFile(id, download = false) {
+  return http.get(`/api/gallery/${id}/file`, {
+    params: download ? { download: 1 } : {},
+    responseType: 'blob'
+  })
+}
+
+export async function deleteGalleryItem(id) {
+  const { data } = await http.delete(`/api/gallery/${id}`)
+  return data.data // { id }
 }
 
 export { API_BASE }
