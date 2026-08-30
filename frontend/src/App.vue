@@ -27,6 +27,7 @@
       <button v-if="!showAdmin && !showStats && !showGallery" class="btn-clear" title="清空当前对话" @click="onClear">
         清空
       </button>
+      <button class="btn-clear" title="使用帮助" @click="showHelp = !showHelp">帮助</button>
       <button class="btn-logout" title="退出登录" @click="onLogout">退出</button>
     </header>
 
@@ -53,6 +54,9 @@
 
       <ChatInput :disabled="store.sending" @send="onSend" />
     </template>
+
+    <!-- Spec8：帮助弹窗（顶层 overlay，任何视图都可用） -->
+    <HelpModal v-if="showHelp" @close="showHelp = false" />
   </div>
 </template>
 
@@ -67,11 +71,15 @@ import Login from './views/Login.vue'
 import AdminPanel from './views/AdminPanel.vue'
 import StatsPanel from './views/StatsPanel.vue'
 import GalleryPanel from './views/GalleryPanel.vue'
+import HelpModal from './views/HelpModal.vue'
 
 const auth = useAuthStore()
 auth.init()
 
 const store = useChatStore()
+
+// Spec8：帮助弹窗开关（首次登录自动弹出，之后由「帮助」按钮手动开关）
+const showHelp = ref(false)
 
 // 登录态流转 → 按用户重载会话历史（Spec3 §5.2）
 // 启动校验完成（auth.loaded）后取 username；登录 / 登出 / token 失效时 username 变化同样触发。
@@ -81,6 +89,14 @@ watch(
   ([loaded]) => {
     if (!loaded) return
     store.resetForUser(auth.token ? auth.username : null)
+    // Spec8：登录态就绪后，该用户首次登录自动弹出帮助弹窗（弹出即标记，只弹一次）
+    if (auth.token && auth.username) {
+      const seenKey = `artcn_help_seen:${auth.username}`
+      if (!localStorage.getItem(seenKey)) {
+        localStorage.setItem(seenKey, '1')
+        showHelp.value = true
+      }
+    }
   },
   { immediate: true }
 )
