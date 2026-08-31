@@ -633,9 +633,15 @@ async def share_image(token: str, download: bool = False):
 @app.post("/api/suggestions")
 async def create_suggestion(payload: schemas.SuggestionCreateRequest, request: Request,
                             x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
-    """任意登录用户写信（1~2000 字）。"""
+    """任意登录用户写信（1~2000 字）；管理员只能审批、不能写（Spec10 §2.2）。"""
     request_id = _request_id(x_request_id)
     user = request.state.user
+    if user["is_admin"]:
+        logger.info("管理员写建议被拒", extra={
+            "event": "suggestion.rejected", "request_id": request_id,
+            "user_id": user["id"],
+        })
+        raise ForbiddenError("管理员不能提交建议，只能审批")
     text = (payload.text or "").strip()
     if not text or len(text) > config.SUGGESTION_TEXT_MAX:
         raise SuggestionContentError(f"建议内容需为 1~{config.SUGGESTION_TEXT_MAX} 字")
@@ -656,10 +662,10 @@ async def list_my_suggestions(request: Request):
 
 @app.get("/api/admin/suggestions")
 async def admin_list_suggestions(request: Request, status: str = ""):
-    """管理员查看全部建议，可 ?status=pending|read|resolved 筛选。"""
+    """管理员查看全部建议，可 ?status=pending|resolved 筛选。"""
     st = status or None
-    if st is not None and st not in ("pending", "read", "resolved"):
-        raise SuggestionContentError("建议状态需为 pending / read / resolved")
+    if st is not None and st not in ("pending", "resolved"):
+        raise SuggestionContentError("建议状态需为 pending / resolved")
     return _ok({"items": db.list_all_suggestions(st)})
 
 
@@ -667,11 +673,11 @@ async def admin_list_suggestions(request: Request, status: str = ""):
 async def admin_update_suggestion(suggestion_id: int, payload: schemas.SuggestionUpdateRequest,
                                   request: Request,
                                   x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
-    """管理员标记状态 / 写回复（可只改其一）；status/reply 非法或不存在 → 错误码。"""
+    """管理员标记状态 / 写回复（可只改其一，一次落库）；status/reply 非法或不存在 → 错误码。"""
     request_id = _request_id(x_request_id)
     user = request.state.user
-    if payload.status is not None and payload.status not in ("pending", "read", "resolved"):
-        raise SuggestionContentError("建议状态需为 pending / read / resolved")
+    if payload.status is not None and payload.status not in ("pending", "resolved"):
+        raise SuggestionContentError("建议状态需为 pending / resolved")
     if db.get_suggestion(suggestion_id) is None:
         raise SuggestionNotFoundError()
     reply = payload.reply

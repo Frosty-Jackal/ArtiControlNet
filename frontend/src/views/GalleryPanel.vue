@@ -313,42 +313,6 @@ onBeforeUnmount(releaseThumbs)
 </script>
 
 <style scoped>
-.gallery-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.gallery-tab {
-  padding: 5px 14px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-full);
-  transition: all var(--transition-fast);
-}
-
-.gallery-tab:hover {
-  color: var(--text-primary);
-  border-color: var(--border-light);
-  background: var(--bg-surface-hover);
-}
-
-.gallery-tab.active {
-  color: #fff;
-  background: var(--purple-600);
-  border-color: var(--purple-600);
-}
-
-.gallery-empty {
-  padding: 48px 0;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 14px;
-}
-
 .gallery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -469,39 +433,4 @@ onBeforeUnmount(releaseThumbs)
   padding: 8px 12px 12px;
 }
 
-.gallery-lightbox {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  background: rgba(5, 3, 10, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  animation: fade-in var(--transition-normal);
-}
-
-.gallery-lightbox-inner {
-  max-width: 90%;
-  max-height: 90%;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.gallery-lightbox-inner img {
-  max-width: 100%;
-  max-height: 80vh;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-}
-
-.gallery-lightbox-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
 </style>

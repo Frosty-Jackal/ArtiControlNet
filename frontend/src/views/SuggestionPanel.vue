@@ -4,32 +4,12 @@
       <h2>建议箱</h2>
       <button class="btn-clear" @click="emit('close')">返回聊天</button>
     </div>
-    <p class="admin-tip">
-      当前登录：{{ auth.username }} · 告诉我们哪里还能更好（≤2000 字）
-    </p>
 
-    <div class="gallery-tabs">
-      <button
-        class="gallery-tab"
-        :class="{ active: tab === 'mine' }"
-        @click="switchTab('mine')"
-      >
-        我的建议
-      </button>
-      <button
-        v-if="auth.isAdmin"
-        class="gallery-tab"
-        :class="{ active: tab === 'admin' }"
-        @click="switchTab('admin')"
-      >
-        管理建议
-      </button>
-    </div>
-
-    <p v-if="error" class="login-error">{{ error }}</p>
-
-    <!-- 我的建议：写信 + 列表（含状态与管理员回复） -->
-    <template v-if="tab === 'mine'">
+    <!-- 普通用户：写信 + 我的建议（点击弹窗只读查看） -->
+    <template v-if="!auth.isAdmin">
+      <p class="admin-tip">
+        当前登录：{{ auth.username }} · 告诉我们哪里还能更好（≤2000 字）
+      </p>
       <div class="suggestion-write">
         <textarea
           v-model="draft"
@@ -46,22 +26,52 @@
         </div>
       </div>
 
-      <div v-if="!loadingMine && mine.length === 0" class="gallery-empty">还没有提交过建议</div>
+      <p v-if="error" class="login-error">{{ error }}</p>
+
+      <div v-if="!loading && mine.length === 0" class="gallery-empty">还没有提交过建议</div>
       <div v-else class="suggestion-list">
-        <div v-for="s in mine" :key="s.id" class="suggestion-item">
-          <div class="suggestion-item-head">
+        <button
+          v-for="s in mine"
+          :key="s.id"
+          class="suggestion-card"
+          @click="viewing = s"
+        >
+          <div class="suggestion-card-head">
             <span class="suggestion-status" :class="'st-' + s.status">{{ statusLabel(s.status) }}</span>
-            <span class="community-time">{{ formatTime(s.created_at) }}</span>
+            <span class="suggestion-time">{{ formatTime(s.created_at) }}</span>
           </div>
-          <p class="suggestion-text">{{ s.text }}</p>
-          <p v-if="s.reply" class="suggestion-reply">管理员回复：{{ s.reply }}</p>
+          <p class="suggestion-card-text">{{ s.text }}</p>
+          <p v-if="s.reply" class="suggestion-card-reply">回复：{{ s.reply }}</p>
+          <span class="suggestion-card-hint">点击查看详情</span>
+        </button>
+      </div>
+
+      <!-- 用户只读弹窗：全文 + 状态 + 管理员回复 -->
+      <div v-if="viewing" class="gallery-lightbox" @click.self="viewing = null">
+        <div class="suggestion-modal">
+          <div class="suggestion-modal-head">
+            <span class="suggestion-status" :class="'st-' + viewing.status">{{ statusLabel(viewing.status) }}</span>
+            <span class="suggestion-time">{{ formatTime(viewing.created_at) }}</span>
+          </div>
+          <p class="suggestion-modal-text">{{ viewing.text }}</p>
+          <p v-if="viewing.reply" class="suggestion-reply">管理员回复：{{ viewing.reply }}</p>
+          <p v-else class="suggestion-reply-empty">管理员尚未回复</p>
+          <div class="suggestion-modal-foot">
+            <button class="btn-clear" @click="viewing = null">关闭</button>
+          </div>
         </div>
       </div>
     </template>
 
-    <!-- 管理建议：改状态 + 写回复 + 删除 -->
+    <!-- 管理员：只能审批（回复弹窗 + 删除），无写信区 -->
     <template v-else>
-      <div v-if="!loadingAll && all.length === 0" class="gallery-empty">暂无建议</div>
+      <p class="admin-tip">
+        当前登录：{{ auth.username }}（管理员） · 只能审批建议，不能写信
+      </p>
+
+      <p v-if="error" class="login-error">{{ error }}</p>
+
+      <div v-if="!loading && all.length === 0" class="gallery-empty">暂无建议</div>
       <div v-else class="admin-table-wrap">
         <table class="user-table">
           <thead>
@@ -78,40 +88,60 @@
             <tr v-for="s in all" :key="s.id">
               <td>{{ s.author }}</td>
               <td>
-                <select
-                  v-model="s.status"
-                  class="suggestion-select"
-                  @change="onStatusChange(s)"
-                >
-                  <option value="pending">待处理</option>
-                  <option value="read">已读</option>
-                  <option value="resolved">已处理</option>
-                </select>
+                <span class="suggestion-status" :class="'st-' + s.status">{{ statusLabel(s.status) }}</span>
               </td>
-              <td class="suggestion-cell-text">{{ s.text }}</td>
+              <td class="suggestion-cell-text" :title="s.text">{{ s.text }}</td>
+              <td class="suggestion-cell-text" :title="s.reply || ''">{{ s.reply || '—' }}</td>
+              <td class="suggestion-time">{{ formatTime(s.created_at) }}</td>
               <td>
-                <input
-                  v-model="s.reply"
-                  class="suggestion-reply-input"
-                  :maxlength="2000"
-                  :placeholder="s.reply || '回复…'"
-                  @change="onReply(s)"
-                />
-              </td>
-              <td class="community-time">{{ formatTime(s.created_at) }}</td>
-              <td>
-                <button class="btn-mini danger" @click="remove(s)">删除</button>
+                <div class="suggestion-actions">
+                  <button class="btn-mini" @click="openEdit(s)">回复 / 审批</button>
+                  <button class="btn-mini danger" @click="remove(s)">删除</button>
+                </div>
               </td>
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- 管理员回复弹窗：状态二选一（默认已处理）+ 回复 + 发送，一次落库 -->
+      <div v-if="editing" class="gallery-lightbox" @click.self="editing = null">
+        <div class="suggestion-modal">
+          <div class="suggestion-modal-head">
+            <h3 class="suggestion-modal-title">回复 / 审批建议</h3>
+            <span class="suggestion-time">{{ editing.author }} · {{ formatTime(editing.created_at) }}</span>
+          </div>
+          <p class="suggestion-modal-text">{{ editing.text }}</p>
+          <div class="suggestion-edit-field">
+            <label class="suggestion-edit-label">状态</label>
+            <select v-model="editStatus" class="suggestion-select">
+              <option value="resolved">已处理</option>
+              <option value="pending">待管理员处理</option>
+            </select>
+          </div>
+          <div class="suggestion-edit-field">
+            <label class="suggestion-edit-label">回复内容</label>
+            <textarea
+              v-model="editReply"
+              class="suggestion-textarea"
+              :maxlength="2000"
+              :placeholder="'回复（' + editReply.length + '/2000）'"
+              rows="4"
+            ></textarea>
+          </div>
+          <p class="suggestion-edit-hint">发送即保存到数据库；默认标记为「已处理」，可手动改为「待管理员处理」</p>
+          <div class="suggestion-modal-foot">
+            <button class="btn-clear" @click="editing = null">取消</button>
+            <button class="btn-mini" :disabled="saving" @click="saveEdit">发送</button>
+          </div>
+        </div>
       </div>
     </template>
   </div>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   deleteSuggestion, listAllSuggestions, listMySuggestions,
   submitSuggestion, updateSuggestion
@@ -121,16 +151,20 @@ import { useAuthStore } from '../store/auth'
 const emit = defineEmits(['close'])
 const auth = useAuthStore()
 
-const tab = ref('mine')
 const draft = ref('')
 const sending = ref(false)
+const saving = ref(false)
 const error = ref('')
 const mine = ref([])
 const all = ref([])
-const loadingMine = ref(false)
-const loadingAll = ref(false)
+const loading = ref(false)
+const viewing = ref(null) // 普通用户：当前只读查看的建议
+const editing = ref(null) // 管理员：当前回复/审批的建议
+const editStatus = ref('resolved')
+const editReply = ref('')
 
-const STATUS_LABELS = { pending: '待处理', read: '已读', resolved: '已处理' }
+// Spec10：状态收敛两态——待管理员处理 / 已处理（不再有"待用户处理/已读"）
+const STATUS_LABELS = { pending: '待管理员处理', resolved: '已处理' }
 
 function statusLabel(st) {
   return STATUS_LABELS[st] || st || '未知'
@@ -141,40 +175,24 @@ function formatTime(iso) {
   return new Date(iso).toLocaleString()
 }
 
-function switchTab(v) {
-  tab.value = v
+function load() {
+  loading.value = true
   error.value = ''
-  if (v === 'mine' && mine.value.length === 0) loadMine()
-  if (v === 'admin' && all.value.length === 0) loadAll()
+  const p = auth.isAdmin ? listAllSuggestions() : listMySuggestions()
+  return p
+    .then((data) => {
+      if (auth.isAdmin) all.value = data.items || []
+      else mine.value = data.items || []
+    })
+    .catch((e) => {
+      error.value = e.message || '加载建议失败'
+    })
+    .finally(() => {
+      loading.value = false
+    })
 }
 
-async function loadMine() {
-  loadingMine.value = true
-  error.value = ''
-  try {
-    const data = await listMySuggestions()
-    mine.value = data.items || []
-  } catch (e) {
-    error.value = e.message || '加载建议失败'
-  } finally {
-    loadingMine.value = false
-  }
-}
-
-async function loadAll() {
-  loadingAll.value = true
-  error.value = ''
-  try {
-    const data = await listAllSuggestions()
-    all.value = data.items || []
-  } catch (e) {
-    error.value = e.message || '加载建议失败'
-  } finally {
-    loadingAll.value = false
-  }
-}
-
-// Spec9 §6.2：发送前 confirm 警告一次（仅写信时）
+// ---- 普通用户写信 ----
 async function sendSuggestion() {
   const text = draft.value.trim()
   if (!text || sending.value) return
@@ -184,7 +202,7 @@ async function sendSuggestion() {
   try {
     await submitSuggestion(text)
     draft.value = ''
-    await loadMine()
+    await load()
   } catch (e) {
     error.value = e.message || '发送失败'
   } finally {
@@ -192,25 +210,32 @@ async function sendSuggestion() {
   }
 }
 
-async function onStatusChange(s) {
+// ---- 管理员回复/审批 ----
+function openEdit(s) {
+  editing.value = s
+  // 发送回复自动标记「已处理」，管理员可手动改回「待管理员处理」
+  editStatus.value = 'resolved'
+  editReply.value = s.reply || ''
   error.value = ''
-  try {
-    const r = await updateSuggestion(s.id, { status: s.status })
-    s.status = r.status
-  } catch (e) {
-    error.value = e.message || '更新状态失败'
-    await loadAll() // 回滚为服务端状态
-  }
 }
 
-async function onReply(s) {
+async function saveEdit() {
+  if (!editing.value || saving.value) return
+  saving.value = true
   error.value = ''
+  const id = editing.value.id
   try {
-    const r = await updateSuggestion(s.id, { reply: s.reply })
-    s.reply = r.reply
+    const r = await updateSuggestion(id, { status: editStatus.value, reply: editReply.value.trim() })
+    const row = all.value.find((x) => x.id === id)
+    if (row) {
+      row.status = r.status
+      row.reply = r.reply
+    }
+    editing.value = null
   } catch (e) {
-    error.value = e.message || '保存回复失败'
-    await loadAll()
+    error.value = e.message || '保存失败'
+  } finally {
+    saving.value = false
   }
 }
 
@@ -221,12 +246,24 @@ async function remove(s) {
     await deleteSuggestion(s.id)
     const i = all.value.findIndex((x) => x.id === s.id)
     if (i !== -1) all.value.splice(i, 1)
+    if (editing.value && editing.value.id === s.id) editing.value = null
   } catch (e) {
     error.value = e.message || '删除失败'
   }
 }
 
-onMounted(loadMine)
+// Esc 关闭弹窗
+function onKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (editing.value) editing.value = null
+  else if (viewing.value) viewing.value = null
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  load()
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <style scoped>
@@ -266,20 +303,31 @@ onMounted(loadMine)
   color: var(--text-muted);
 }
 
+/* 用户端建议卡片（点击弹窗只读查看） */
 .suggestion-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.suggestion-item {
+.suggestion-card {
+  display: block;
+  width: 100%;
   padding: 12px 14px;
+  text-align: left;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
 }
 
-.suggestion-item-head {
+.suggestion-card:hover {
+  border-color: var(--purple-500);
+  transform: translateY(-1px);
+}
+
+.suggestion-card-head {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -292,56 +340,152 @@ onMounted(loadMine)
   border-radius: var(--radius-full);
   border: 1px solid var(--border-light);
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .suggestion-status.st-pending { color: #fbbf24; border-color: #92400e; }
-.suggestion-status.st-read { color: #93c5fd; border-color: #1e3a8a; }
 .suggestion-status.st-resolved { color: #6ee7b7; border-color: #065f46; }
 
-.suggestion-text {
+.suggestion-time {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.suggestion-card-text {
   margin: 0;
   font-size: 14px;
   color: var(--text-primary);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
-.suggestion-reply {
-  margin: 8px 0 0;
+.suggestion-card-reply {
+  margin: 6px 0 0;
   font-size: 13px;
   color: var(--purple-300);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.suggestion-card-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 弹窗（用户只读 / 管理员回复共用外壳） */
+.suggestion-modal {
+  max-width: 620px;
+  width: 100%;
+  max-height: 90%;
+  overflow-y: auto;
+  padding: 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.suggestion-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.suggestion-modal-title {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text-primary);
+}
+
+.suggestion-modal-text {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.suggestion-reply {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--purple-300);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: rgba(124, 58, 237, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  border-radius: var(--radius-md);
+}
+
+.suggestion-reply-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.suggestion-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+/* 管理员回复弹窗字段 */
+.suggestion-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggestion-edit-label {
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 .suggestion-select {
-  padding: 3px 6px;
+  padding: 6px 10px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-md);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 13px;
 }
 
-.suggestion-reply-input {
-  width: 160px;
-  padding: 5px 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-lg);
-  color: var(--text-primary);
+.suggestion-edit-hint {
+  margin: 0;
   font-size: 12px;
+  color: var(--text-muted);
 }
 
-.suggestion-reply-input:focus {
-  outline: none;
-  border-color: var(--purple-500);
+/* 管理表格 */
+.suggestion-actions {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .suggestion-cell-text {
-  max-width: 240px;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

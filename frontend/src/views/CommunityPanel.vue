@@ -116,13 +116,25 @@
               <div v-else class="community-pick-thumb community-thumb-empty">…</div>
             </button>
           </div>
-          <label v-else class="community-upload-box">
+          <label
+            v-else
+            class="community-upload-box"
+            :class="{ 'drag-over': uploadDrag }"
+            @dragenter.prevent="onDragEnter"
+            @dragover.prevent
+            @dragleave.prevent="onDragLeave"
+            @drop.prevent="onDropFile"
+          >
             <input type="file" accept="image/*" class="community-file-input" @change="onPickFile" />
             <template v-if="!previewUrl">
-              <span class="community-upload-icon">📷</span>
-              <span>选择图片（≤2000px，jpg/png/webp/gif）</span>
+              <span class="community-upload-icon">🖼</span>
+              <span class="community-upload-title">点击选择，或把图片拖到这里</span>
+              <span class="community-upload-sub">jpg / png / webp / gif，≤2000px</span>
             </template>
-            <img v-else :src="previewUrl" class="community-preview" alt="预览" />
+            <template v-else>
+              <img :src="previewUrl" class="community-preview" alt="预览" />
+              <span class="community-upload-replace">点击或拖拽可更换图片</span>
+            </template>
           </label>
         </div>
 
@@ -165,9 +177,11 @@ const createTab = ref('gallery')
 const pickedId = ref(null)
 const createText = ref('')
 const previewUrl = ref(null)
+const uploadDrag = ref(false) // Spec10：上传区拖拽高亮
 let pickedFile = null
 let postObjectUrls = [] // 社区帖子缩略图 objectURL
 let itemObjectUrls = [] // 发帖弹窗作品库缩略图 objectURL
+let dragDepth = 0 // 拖拽进出计数，避免子元素间 dragleave 抖动
 
 function formatTime(iso) {
   if (!iso) return ''
@@ -251,6 +265,8 @@ async function openCreate() {
   createText.value = ''
   pickedId.value = null
   pickedFile = null
+  uploadDrag.value = false
+  dragDepth = 0
   releasePreview()
   await loadMyItems()
 }
@@ -260,6 +276,8 @@ function closeCreate() {
   createText.value = ''
   pickedId.value = null
   pickedFile = null
+  uploadDrag.value = false
+  dragDepth = 0
   releasePreview()
   releaseItemThumbs()
 }
@@ -296,9 +314,47 @@ function releaseItemThumbs() {
   myItems.value = []
 }
 
+function acceptFile(f) {
+  const okType = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(f.type)
+  if (!okType) {
+    error.value = '仅支持 jpg / png / webp / gif 图片'
+    return false
+  }
+  return true
+}
+
 function onPickFile(e) {
   const f = e.target.files && e.target.files[0]
   if (!f) return
+  if (!acceptFile(f)) {
+    e.target.value = ''
+    return
+  }
+  pickedFile = f
+  releasePreview()
+  previewUrl.value = URL.createObjectURL(f)
+}
+
+// Spec10：上传区拖拽拾取（点击选择仍保留）
+function onDragEnter() {
+  dragDepth += 1
+  uploadDrag.value = true
+}
+
+function onDragLeave() {
+  dragDepth -= 1
+  if (dragDepth <= 0) {
+    dragDepth = 0
+    uploadDrag.value = false
+  }
+}
+
+function onDropFile(e) {
+  dragDepth = 0
+  uploadDrag.value = false
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]
+  if (!f) return
+  if (!acceptFile(f)) return
   pickedFile = f
   releasePreview()
   previewUrl.value = URL.createObjectURL(f)
@@ -438,11 +494,6 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 
-.community-time {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
 /* 帖子弹窗 */
 .community-modal {
   max-width: 720px;
@@ -546,13 +597,16 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 24px;
+  gap: 8px;
+  padding: 28px 20px;
+  min-height: 140px;
+  background: var(--bg-input);
   border: 1px dashed var(--border-light);
   border-radius: var(--radius-lg);
   color: var(--text-muted);
   cursor: pointer;
-  transition: border-color var(--transition-fast), color var(--transition-fast);
+  transition: border-color var(--transition-fast), color var(--transition-fast),
+    background var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .community-upload-box:hover {
@@ -560,12 +614,37 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
-.community-file-input {
-  display: none;
+.community-upload-box.drag-over {
+  border-color: var(--purple-500);
+  border-style: solid;
+  color: var(--text-primary);
+  background: rgba(124, 58, 237, 0.12);
+  box-shadow: var(--shadow-glow);
 }
 
 .community-upload-icon {
-  font-size: 28px;
+  font-size: 30px;
+}
+
+.community-upload-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.community-upload-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.community-upload-replace {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.community-file-input {
+  display: none;
 }
 
 .community-preview {

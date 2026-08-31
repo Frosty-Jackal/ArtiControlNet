@@ -133,7 +133,7 @@ _CREATE_SUGGESTIONS_INDEX = (
 _FEEDBACK_CATEGORIES = ("generate", "edit", "qa")
 _FEEDBACK_VOTES = ("like", "dislike")
 # 建议状态白名单（update_suggestion 校验）
-_SUGGESTION_STATUSES = ("pending", "read", "resolved")
+_SUGGESTION_STATUSES = ("pending", "resolved")  # Spec10：收敛两态，去掉 read / 待用户处理
 
 
 def _now_iso() -> str:
@@ -231,6 +231,8 @@ def init_db() -> None:
         conn.execute(_CREATE_SHARES_TABLE)
         conn.execute(_CREATE_SUGGESTIONS_TABLE)
         conn.execute(_CREATE_SUGGESTIONS_INDEX)
+        # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
+        conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         conn.commit()
     if count_users() > 0:
         return
