@@ -1,6 +1,8 @@
 # ArtiControlNet 运行说明书
 
-多智能体 AIGC 对话工作台：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」等任务。
+![ArtiControlNet](./GithubPage/cover.jpg)
+
+ArtiControlNet 是一款依托 AI 能力辅助设计师创作的定制化 AIGC 产品：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」等任务。
 仅前端 + 后端两层（登录账号存本地 SQLite `artcn.db`）。详细设计见 [Spec.md](./specs/Spec.md)。
 
 > **网站由后端托管，日常使用只需启动后端；前端只在改代码时才需要碰。**
