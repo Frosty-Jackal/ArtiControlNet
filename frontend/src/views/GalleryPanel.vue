@@ -55,6 +55,25 @@
         <div class="gallery-actions">
           <button class="btn-mini" @click="openLightbox(item)">查看大图</button>
           <button class="btn-mini" @click="download(item)">下载</button>
+          <!-- Spec9：临时分享链接（7 天有效，可撤销；链接绝对 URL 供外部免登录访问） -->
+          <button
+            v-if="!item.share"
+            class="btn-mini"
+            :disabled="busyId === item.id"
+            @click="shareItem(item)"
+          >
+            分享
+          </button>
+          <template v-else>
+            <button class="btn-mini" title="复制免登录链接" @click="copyShare(item.share.url)">复制链接</button>
+            <button
+              class="btn-mini danger"
+              :disabled="busyId === item.id"
+              @click="revokeItem(item)"
+            >
+              撤销分享
+            </button>
+          </template>
           <button
             class="btn-mini danger"
             :disabled="busyId === item.id"
@@ -94,7 +113,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { deleteGalleryItem, fetchGalleryFile, listGallery } from '../api/chatApi'
+import { createShare, deleteGalleryItem, fetchGalleryFile, listGallery, revokeShare } from '../api/chatApi'
 import { useAuthStore } from '../store/auth'
 
 const emit = defineEmits(['close'])
@@ -221,8 +240,8 @@ function openLightbox(item) {
   if (item.objectUrl) lightbox.value = item
 }
 
-// 复制全文：优先 navigator.clipboard，非安全上下文回退隐藏 textarea + execCommand
-async function copyPrompt(text) {
+// 复制：优先 navigator.clipboard，非安全上下文回退隐藏 textarea + execCommand（Spec9 分享链接复用）
+async function copyText(text) {
   copied.value = false
   let ok = false
   try {
@@ -247,6 +266,45 @@ async function copyPrompt(text) {
     setTimeout(() => (copied.value = false), 1500)
   } else {
     error.value = '复制失败，请手动选择复制'
+  }
+}
+
+async function copyPrompt(text) {
+  await copyText(text)
+}
+
+// Spec9 §5.3：生成分享链接 → 立即复制到剪贴板（后端返回绝对 URL）
+async function shareItem(item) {
+  error.value = ''
+  busyId.value = item.id
+  try {
+    const share = await createShare(item.id)
+    item.share = share
+    await copyText(share.url)
+  } catch (e) {
+    error.value = e.message || '生成分享链接失败'
+  } finally {
+    busyId.value = null
+  }
+}
+
+async function copyShare(url) {
+  await copyText(url)
+}
+
+// Spec9 §5.3：撤销分享（链接立即失效；前端仅移除本地引用）
+async function revokeItem(item) {
+  if (!item.share) return
+  if (!window.confirm('确定撤销这条分享链接？链接将立即失效。')) return
+  error.value = ''
+  busyId.value = item.id
+  try {
+    await revokeShare(item.share.id)
+    item.share = null
+  } catch (e) {
+    error.value = e.message || '撤销失败'
+  } finally {
+    busyId.value = null
   }
 }
 

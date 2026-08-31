@@ -92,3 +92,38 @@ class AdminResetPasswordRequest(BaseModel):
 
 class AdminSetAdminRequest(BaseModel):
     is_admin: bool
+
+
+# ---- 社区 / 反馈 / 分享 / 建议（Spec9 §6）----
+
+class VoteRequest(BaseModel):
+    """POST /api/community/{post_id}/vote 请求体。vote=null 表示取消。"""
+
+    vote: Optional[str] = None          # 'like' | 'dislike' | null
+
+
+class FeedbackRequest(BaseModel):
+    """POST /api/feedback 请求体。vote=null 表示取消。"""
+
+    task_id: int
+    category: str                       # 'generate' | 'edit' | 'qa'
+    vote: Optional[str] = None          # 'like' | 'dislike' | null
+
+
+class ShareCreateRequest(BaseModel):
+    """POST /api/shares 请求体。"""
+
+    image_id: int
+
+
+class SuggestionCreateRequest(BaseModel):
+    """POST /api/suggestions 请求体。"""
+
+    text: str
+
+
+class SuggestionUpdateRequest(BaseModel):
+    """PUT /api/admin/suggestions/{id} 请求体（可只改其一）。"""
+
+    status: Optional[str] = None        # 'pending' | 'read' | 'resolved'
+    reply: Optional[str] = None

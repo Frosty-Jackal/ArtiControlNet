@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { getTask, sendChat, uploadImage } from '../api/chatApi'
+import { getTask, postFeedback, sendChat, uploadImage } from '../api/chatApi'
 
 // 历史键按用户名隔离：artcn_chat_v2:<username>（Spec3 §5.1）；旧的单一键 artcn_chat_v2 废弃不再读写
 function chatKey(username) {
@@ -134,10 +134,18 @@ export const useChatStore = defineStore('chat', {
         }
         if (task.status === 'COMPLETED') {
           const result = task.result || {}
+          // Spec9：工具类结果（文生图 / 图文生图 / 图像QA）带上 tool + task_id，气泡下方可 👍/👎；
+          // 纯对话结果无 tool → 不渲染反馈行。qa_image 虽是文本气泡（kind=text）同样可反馈。
+          const isToolResult = ['generate_image', 'edit_image', 'qa_image'].includes(result.tool)
+          const feedback = isToolResult ? { tool: result.tool, task_id: taskId, vote: null } : {}
           if (result.kind === 'text') {
-            this.replaceMessage(pendingId, { id: pendingId, role: 'assistant', kind: 'text', text: result.text })
+            this.replaceMessage(pendingId, {
+              id: pendingId, role: 'assistant', kind: 'text', text: result.text, ...feedback
+            })
           } else {
-            this.replaceMessage(pendingId, { id: pendingId, role: 'assistant', kind: 'images', images: result.images || [] })
+            this.replaceMessage(pendingId, {
+              id: pendingId, role: 'assistant', kind: 'images', images: result.images || [], ...feedback
+            })
           }
           this.persist()
         } else if (task.status === 'FAILED') {
@@ -167,6 +175,25 @@ export const useChatStore = defineStore('chat', {
       this.messages = []
       this.sending = false
       this.persist()
+    },
+
+    // Spec9：服务结果气泡 👍/👎（再点同一项取消）；仅 tool 类结果可反馈
+    async toggleFeedback(msg, choice) {
+      if (!msg || !msg.tool || !msg.task_id) return
+      const next = msg.vote === choice ? null : choice
+      try {
+        await postFeedback({ taskId: msg.task_id, category: this.mapToolCategory(msg.tool), vote: next })
+        msg.vote = next
+        this.persist()
+      } catch (e) {
+        window.alert('反馈提交失败：' + e.message)
+      }
+    },
+
+    mapToolCategory(tool) {
+      if (tool === 'edit_image') return 'edit'
+      if (tool === 'qa_image') return 'qa'
+      return 'generate'
     }
   }
 })

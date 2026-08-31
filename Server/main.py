@@ -11,23 +11,28 @@ from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, File, Header, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import auth
+import community
 import config
 import db
 import gallery
 import media
 import schemas
+import shares
 from agents.supervisor import run_supervisor
 from errors import (AppError, AuthTokenError, BadRequestError,
-                    CredentialsFormatError, FileMissingError, ForbiddenError,
-                    LoginFailedError, LoginRateLimitedError, NotFoundError,
-                    UnsupportedImageTypeError, UserNotFoundError)
+                    CredentialsFormatError, FeedbackParamError, FileMissingError,
+                    ForbiddenError, LoginFailedError, LoginRateLimitedError,
+                    NotFoundError, PostContentError, PostNotFoundError,
+                    ShareNotFoundError, SuggestionContentError,
+                    SuggestionNotFoundError, UnsupportedImageTypeError,
+                    UserNotFoundError)
 from logging_setup import configure_logging
 from task_queue import Task, TaskQueue
 
@@ -413,9 +418,9 @@ async def get_thread_messages(thread_id: str, request: Request):
 
 @app.get("/api/gallery")
 async def list_gallery(request: Request, source: str = ""):
-    """本人作品列表（时间倒序），可 ?source=upload|generate|edit 筛选。鉴权由统一中间件。"""
+    """本人作品列表（时间倒序），可 ?source=upload|generate|edit 筛选；每项含可空 share（Spec9 §6.1）。"""
     user = request.state.user
-    items = gallery.list_user_images(user["id"], source or None)
+    items = gallery.list_user_images(user["id"], source or None, _public_base(request))
     return _ok({"items": items})
 
 
@@ -437,10 +442,267 @@ async def gallery_file(item_id: int, request: Request, download: bool = False):
 
 @app.delete("/api/gallery/{item_id}")
 async def delete_gallery_item(item_id: int, request: Request):
-    """删除本人作品：记录 + gallery/ 物理文件一并删除。"""
+    """删除本人作品：记录 + gallery/ 物理文件一并删除（分享级联在 gallery.delete_item 内）。"""
     user = request.state.user
     gallery.delete_item(item_id, user["id"])
     return _ok({"id": item_id})
+
+
+# ---------- 社区（Spec9 §6.1）----------
+
+@app.post("/api/community")
+async def create_community_post(request: Request,
+                                text: str = Form(...),
+                                gallery_id: Optional[int] = Form(None),
+                                file: Optional[UploadFile] = File(None),
+                                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """发帖：单图（作品库选择 gallery_id 或新上传 file）+ 文字（1~1000 字）。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    body = (text or "").strip()
+    if not body or len(body) > config.COMMUNITY_POST_TEXT_MAX:
+        raise PostContentError(f"帖子文字需为 1~{config.COMMUNITY_POST_TEXT_MAX} 字")
+    has_gallery = gallery_id is not None
+    has_file = file is not None and file.filename
+    if has_gallery == has_file:
+        raise PostContentError("图片来源需二选一：从作品库选择或上传新图")
+    image_bytes = None
+    ext = None
+    if has_file:
+        data = await file.read()
+        ext = media.validate_upload(data)               # 40002 / 40003 / 40004
+        image_bytes = data
+    post = community.create_post(user["id"], body, gallery_id=gallery_id,
+                                 image_bytes=image_bytes, ext=ext)
+    logger.info("发帖", extra={
+        "event": "community.posted", "request_id": request_id,
+        "user_id": user["id"], "post_id": post["id"],
+    })
+    return _ok({"post": {
+        "id": post["id"],
+        "text": post["text"],
+        "author": user["username"],
+        "author_is_admin": user["is_admin"],
+        "image_url": f"/api/community/{post['id']}/image",
+        "like_count": 0,
+        "dislike_count": 0,
+        "my_vote": None,
+        "created_at": post["created_at"],
+    }})
+
+
+@app.get("/api/community")
+async def list_community(request: Request, offset: int = 0, limit: int = 50):
+    """帖子列表，最新在前；每项含作者、计数、我的投票。limit≤100。"""
+    user = request.state.user
+    offset = max(0, offset)
+    limit = max(1, min(limit, 100))
+    return _ok({"items": community.list_posts(user["id"], offset, limit)})
+
+
+@app.get("/api/community/{post_id}/image")
+async def community_image(post_id: int, request: Request):
+    """帖子图片（任何登录用户可看，不校验归属——社区对所有人开放）。"""
+    post, data = community.read_post_image(post_id)
+    return Response(content=data, media_type=community.mime_for(post))
+
+
+@app.post("/api/community/{post_id}/vote")
+async def community_vote(post_id: int, payload: schemas.VoteRequest, request: Request):
+    """点赞 / 点踩 / 取消（vote=null 删行）；返回现算计数与我的选择。"""
+    user = request.state.user
+    vote = payload.vote
+    if vote not in (None, "like", "dislike"):
+        raise PostContentError("投票取值只能为 like / dislike / null")
+    result = community.vote(post_id, user["id"], vote)
+    logger.info("投票", extra={
+        "event": "community.voted", "post_id": post_id,
+        "user_id": user["id"], "vote": vote or "cancel",
+    })
+    return _ok(result)
+
+
+@app.delete("/api/community/{post_id}")
+async def delete_community_post(post_id: int, request: Request,
+                                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """删帖（作者或管理员）；文件与投票级联删除。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    community.delete_post(post_id, user["id"], user["is_admin"])
+    logger.info("删帖", extra={
+        "event": "community.deleted", "request_id": request_id,
+        "user_id": user["id"], "post_id": post_id,
+    })
+    return _ok({"id": post_id})
+
+
+# ---------- AI 服务反馈（Spec9 §6.1）----------
+
+_FEEDBACK_CATEGORIES = ("generate", "edit", "qa")
+
+
+@app.post("/api/feedback")
+async def post_feedback(payload: schemas.FeedbackRequest, request: Request,
+                        x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """服务结果 👍/👎 / 取消（vote=null 删行）。category 限定三类生成服务。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    if payload.category not in _FEEDBACK_CATEGORIES:
+        raise FeedbackParamError("反馈类别需为 generate / edit / qa")
+    if payload.vote not in (None, "like", "dislike"):
+        raise FeedbackParamError("反馈投票需为 like / dislike / null")
+    db.set_feedback(payload.task_id, user["id"], payload.category, payload.vote)
+    logger.info("服务反馈", extra={
+        "event": "feedback.voted", "request_id": request_id,
+        "user_id": user["id"], "task_id": payload.task_id,
+        "category": payload.category, "vote": payload.vote or "cancel",
+    })
+    return _ok({"task_id": payload.task_id, "category": payload.category, "vote": payload.vote})
+
+
+@app.post("/api/admin/feedback/clear")
+async def admin_clear_feedback(request: Request, category: str = "",
+                               x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """管理员清空反馈统计（可 ?category= 只清一类）。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    cat = category or None
+    if cat is not None and cat not in _FEEDBACK_CATEGORIES:
+        raise FeedbackParamError("反馈类别需为 generate / edit / qa")
+    cleared = db.clear_feedback(cat)
+    logger.info("清空反馈统计", extra={
+        "event": "feedback.cleared", "request_id": request_id,
+        "operator": user["username"], "category": cat or "all",
+    })
+    return _ok({"cleared": cleared})
+
+
+# ---------- 作品分享链接（Spec9 §6.1）----------
+
+@app.post("/api/shares")
+async def create_share(payload: schemas.ShareCreateRequest, request: Request,
+                       x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """为本人作品生成公开免登录临时分享链接（覆盖旧 token，7 天有效）。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    result = shares.create_share(user["id"], payload.image_id, _public_base(request))
+    logger.info("生成分享链接", extra={
+        "event": "share.created", "request_id": request_id,
+        "user_id": user["id"], "image_id": payload.image_id,
+    })
+    return _ok(result)
+
+
+@app.delete("/api/shares/{share_id}")
+async def revoke_share(share_id: int, request: Request,
+                       x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """撤销本人分享链接（仅本人，40403 不泄露存在性）。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    image_id = shares.revoke_share(share_id, user["id"])
+    logger.info("撤销分享链接", extra={
+        "event": "share.revoked", "request_id": request_id,
+        "user_id": user["id"], "image_id": image_id,
+    })
+    return _ok({"id": share_id})
+
+
+@app.get("/share/{token}")
+async def share_page(token: str):
+    """免登录分享页：紫色主题 HTML + 大图 + 作者 + 下载链接。非 /api 路径天然公开。"""
+    share, image = shares.resolve_token(token)
+    author = db.get_user_by_id(share["user_id"])["username"]
+    return HTMLResponse(content=shares.render_share_page(share, image, author))
+
+
+@app.get("/share/{token}/image")
+async def share_image(token: str, download: bool = False):
+    """分享页原图（读 gallery/ 原字节）；?download=1 触发浏览器下载。"""
+    share, image = shares.resolve_token(token)
+    data = shares.read_share_image(image)
+    media_type = gallery.mime_for(image)
+    if download:
+        ext = image.get("ext", ".jpg")
+        headers = {"Content-Disposition": f'attachment; filename="artcn_share_{share["id"]}{ext}"'}
+        return Response(content=data, media_type=media_type, headers=headers)
+    return Response(content=data, media_type=media_type)
+
+
+# ---------- 建议箱（Spec9 §6.1）----------
+
+@app.post("/api/suggestions")
+async def create_suggestion(payload: schemas.SuggestionCreateRequest, request: Request,
+                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """任意登录用户写信（1~2000 字）。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    text = (payload.text or "").strip()
+    if not text or len(text) > config.SUGGESTION_TEXT_MAX:
+        raise SuggestionContentError(f"建议内容需为 1~{config.SUGGESTION_TEXT_MAX} 字")
+    sug = db.create_suggestion(user["id"], text)
+    logger.info("新建议", extra={
+        "event": "suggestion.created", "request_id": request_id,
+        "user_id": user["id"], "suggestion_id": sug["id"], "status": sug["status"],
+    })
+    return _ok({"suggestion": sug})
+
+
+@app.get("/api/suggestions/mine")
+async def list_my_suggestions(request: Request):
+    """我的建议（含管理员回复与状态），新→旧。"""
+    user = request.state.user
+    return _ok({"items": db.list_suggestions(user["id"])})
+
+
+@app.get("/api/admin/suggestions")
+async def admin_list_suggestions(request: Request, status: str = ""):
+    """管理员查看全部建议，可 ?status=pending|read|resolved 筛选。"""
+    st = status or None
+    if st is not None and st not in ("pending", "read", "resolved"):
+        raise SuggestionContentError("建议状态需为 pending / read / resolved")
+    return _ok({"items": db.list_all_suggestions(st)})
+
+
+@app.put("/api/admin/suggestions/{suggestion_id}")
+async def admin_update_suggestion(suggestion_id: int, payload: schemas.SuggestionUpdateRequest,
+                                  request: Request,
+                                  x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """管理员标记状态 / 写回复（可只改其一）；status/reply 非法或不存在 → 错误码。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    if payload.status is not None and payload.status not in ("pending", "read", "resolved"):
+        raise SuggestionContentError("建议状态需为 pending / read / resolved")
+    if db.get_suggestion(suggestion_id) is None:
+        raise SuggestionNotFoundError()
+    reply = payload.reply
+    if reply is not None and len(reply.strip()) > config.SUGGESTION_TEXT_MAX:
+        raise SuggestionContentError(f"回复内容需 ≤{config.SUGGESTION_TEXT_MAX} 字")
+    sug = db.update_suggestion(
+        suggestion_id,
+        status=payload.status,
+        reply=reply.strip() if reply is not None else None,
+    )
+    logger.info("更新建议", extra={
+        "event": "suggestion.updated", "request_id": request_id,
+        "operator": user["username"], "suggestion_id": suggestion_id,
+        "status": sug["status"],
+    })
+    return _ok({"id": sug["id"], "status": sug["status"], "reply": sug["reply"]})
+
+
+@app.delete("/api/admin/suggestions/{suggestion_id}")
+async def admin_delete_suggestion(suggestion_id: int, request: Request,
+                                  x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """管理员删除建议。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    if not db.delete_suggestion(suggestion_id):
+        raise SuggestionNotFoundError()
+    logger.info("删除建议", extra={
+        "event": "suggestion.deleted", "request_id": request_id,
+        "operator": user["username"], "suggestion_id": suggestion_id,
+    })
+    return _ok({"id": suggestion_id})
 
 
 # ---------- 认证 / 用户管理（Spec2 §6）----------
@@ -556,8 +818,10 @@ async def admin_delete_user(user_id: int, request: Request,
         raise BadRequestError("不能删除自己")
     if target["is_admin"] and db.count_admins() <= 1:
         raise BadRequestError("不能删除最后一个管理员")
-    # 级联删除作品：gallery/ 物理文件 + images 记录（Spec5 §3），随后 db 侧清 usage/images/users
+    # 级联删除作品与社区帖子：gallery/ 与 community/ 物理文件 + 记录（Spec5 §3 / Spec9 §3.1），
+    # 随后 db 侧清 usage/images/社区/反馈/分享/建议/users
     gallery.delete_user_gallery(user_id)
+    community.delete_user_posts(user_id)
     db.delete_user(user_id)
     logger.info("删除账号", extra={
         "event": "auth.admin.delete_user", "request_id": request_id,
@@ -568,8 +832,10 @@ async def admin_delete_user(user_id: int, request: Request,
 
 @app.get("/api/admin/stats")
 async def admin_stats(request: Request):
-    """4 类调用聚合统计（只读；鉴权由统一中间件对 /api/admin/* 限管理员，Spec4 §6.2）。"""
-    return _ok(db.get_usage_stats())
+    """4 类调用聚合统计 + AI 服务反馈汇总（只读；/api/admin/* 限管理员，Spec4 §6.2 / Spec9 §6.1）。"""
+    stats = db.get_usage_stats()
+    stats["feedback_totals"] = db.get_feedback_totals()
+    return _ok(stats)
 
 
 # ---------- 静态托管 ----------

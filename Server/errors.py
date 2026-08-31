@@ -116,6 +116,57 @@ class LoginRateLimitedError(AppError):
         super().__init__(42901, message, status_code=429)
 
 
+# ---- 社区 / 反馈 / 分享 / 建议（Spec9 §9，追加到 Spec.md / Spec2 / Spec5 §9 之后）----
+
+class PostContentError(BadRequestError):
+    """帖子内容非法（缺图片 / 双来源或都缺 / 文字为空或超长）。"""
+
+    def __init__(self, message="帖子内容非法"):
+        super().__init__(message, code=40011)
+
+
+class FeedbackParamError(BadRequestError):
+    """反馈参数非法（vote 或 category 不在白名单）。"""
+
+    def __init__(self, message="反馈参数非法"):
+        super().__init__(message, code=40012)
+
+
+class SuggestionContentError(BadRequestError):
+    """建议内容非法（文字为空或超长）。"""
+
+    def __init__(self, message="建议内容非法"):
+        super().__init__(message, code=40013)
+
+
+class PostForbiddenError(AppError):
+    """无权操作该帖子（非作者且非管理员删除他人帖子）。"""
+
+    def __init__(self, message="无权操作该帖子"):
+        super().__init__(40302, message, status_code=403)
+
+
+class PostNotFoundError(NotFoundError):
+    """帖子不存在。"""
+
+    def __init__(self, message="帖子不存在"):
+        super().__init__(message, code=40404)
+
+
+class ShareNotFoundError(NotFoundError):
+    """分享链接不存在或已过期（伪造 token / 已撤销 / 过期 / 作品已删除）。"""
+
+    def __init__(self, message="分享链接不存在或已过期"):
+        super().__init__(message, code=40405)
+
+
+class SuggestionNotFoundError(NotFoundError):
+    """建议不存在。"""
+
+    def __init__(self, message="建议不存在"):
+        super().__init__(message, code=40406)
+
+
 class InternalError(AppError):
     def __init__(self, message="内部错误"):
         super().__init__(50001, message, status_code=500)

@@ -35,12 +35,38 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Spec9：AI 服务反馈汇总（仅统计，不含明细） -->
+    <div class="admin-table-wrap feedback-wrap">
+      <div class="feedback-head">
+        <h3>AI 服务反馈</h3>
+        <button class="btn-mini" :disabled="clearing" @click="clearFeedbackStats">
+          清空反馈统计
+        </button>
+      </div>
+      <table class="user-table">
+        <thead>
+          <tr>
+            <th>服务类型</th>
+            <th>👍 有用</th>
+            <th>👎 没用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in FEEDBACK_ROWS" :key="row.key">
+            <td>{{ row.label }}</td>
+            <td>{{ (feedbackTotals[row.key] && feedbackTotals[row.key].like) || 0 }}</td>
+            <td>{{ (feedbackTotals[row.key] && feedbackTotals[row.key].dislike) || 0 }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getUsageStats } from '../api/chatApi'
+import { clearFeedback, getUsageStats } from '../api/chatApi'
 import { useAuthStore } from '../store/auth'
 
 const emit = defineEmits(['close'])
@@ -51,9 +77,20 @@ const stats = ref({
   total_calls: 0,
   totals: {},
   per_user_avg: {},
-  shares: {}
+  shares: {},
+  feedback_totals: {}
 })
 const error = ref('')
+const clearing = ref(false)
+
+// Spec9：三类服务反馈展示顺序
+const FEEDBACK_ROWS = [
+  { key: 'generate', label: '文生图' },
+  { key: 'edit', label: '图文生图' },
+  { key: 'qa', label: '图像QA' }
+]
+
+const feedbackTotals = computed(() => stats.value.feedback_totals || {})
 
 // 4 类展示顺序（Spec4 §7）
 const CATEGORIES = [
@@ -81,5 +118,41 @@ async function load() {
   }
 }
 
+// Spec9：清空反馈统计（confirm 后调用，仅管理员可见此面板）
+async function clearFeedbackStats() {
+  if (!window.confirm('确定清空全部 AI 服务反馈统计？此操作不可撤销。')) return
+  clearing.value = true
+  error.value = ''
+  try {
+    await clearFeedback()
+    await load()
+  } catch (e) {
+    error.value = e.message || '清空失败'
+  } finally {
+    clearing.value = false
+  }
+}
+
 onMounted(load)
 </script>
+
+<style scoped>
+.feedback-wrap {
+  margin-top: 20px;
+}
+
+.feedback-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.feedback-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+</style>

@@ -157,4 +157,90 @@ export async function deleteGalleryItem(id) {
   return data.data // { id }
 }
 
+// ---- 社区（Spec9 §6.1）----
+
+// multipart：text 必填；图片来源二选一 gallery_id（作品库）或 file（新上传）
+export async function createCommunityPost({ text, galleryId = null, file = null }) {
+  const form = new FormData()
+  form.append('text', text)
+  if (galleryId != null) form.append('gallery_id', String(galleryId))
+  if (file) form.append('file', file)
+  const { data } = await http.post('/api/community', form)
+  return data.data // { post: { id, text, author, author_is_admin, image_url, like_count, dislike_count, my_vote, created_at } }
+}
+
+export async function listCommunity(offset = 0, limit = 50) {
+  const { data } = await http.get('/api/community', { params: { offset, limit } })
+  return data.data // { items: [...] }
+}
+
+// 返回 axios 响应：data 为 Blob。帖子图片同画廊需带 token 拉 blob → objectURL 渲染
+export function fetchCommunityImage(postId) {
+  return http.get(`/api/community/${postId}/image`, { responseType: 'blob' })
+}
+
+export async function votePost(postId, vote) {
+  const { data } = await http.post(`/api/community/${postId}/vote`, { vote })
+  return data.data // { post_id, like_count, dislike_count, my_vote }
+}
+
+export async function deletePost(postId) {
+  const { data } = await http.delete(`/api/community/${postId}`)
+  return data.data // { id }
+}
+
+// ---- AI 服务反馈（Spec9 §6.1）----
+
+// vote: 'like' | 'dislike' | null（取消）；category: 'generate' | 'edit' | 'qa'
+export async function postFeedback({ taskId, category, vote }) {
+  const { data } = await http.post('/api/feedback', { task_id: taskId, category, vote })
+  return data.data // { task_id, category, vote }
+}
+
+export async function clearFeedback(category = '') {
+  const { data } = await http.post('/api/admin/feedback/clear', null, {
+    params: category ? { category } : {}
+  })
+  return data.data // { cleared }
+}
+
+// ---- 作品分享链接（Spec9 §6.1）----
+
+export async function createShare(imageId) {
+  const { data } = await http.post('/api/shares', { image_id: imageId })
+  return data.data // { id, url, expires_at }
+}
+
+export async function revokeShare(shareId) {
+  const { data } = await http.delete(`/api/shares/${shareId}`)
+  return data.data // { id }
+}
+
+// ---- 建议箱（Spec9 §6.1）----
+
+export async function listMySuggestions() {
+  const { data } = await http.get('/api/suggestions/mine')
+  return data.data // { items: [{ id, text, status, reply, created_at }] }
+}
+
+export async function submitSuggestion(text) {
+  const { data } = await http.post('/api/suggestions', { text })
+  return data.data // { suggestion: {...} }
+}
+
+export async function listAllSuggestions(status = '') {
+  const { data } = await http.get('/api/admin/suggestions', { params: status ? { status } : {} })
+  return data.data // { items: [{ id, author, text, status, reply, created_at }] }
+}
+
+export async function updateSuggestion(id, payload) {
+  const { data } = await http.put(`/api/admin/suggestions/${id}`, payload)
+  return data.data // { id, status, reply }
+}
+
+export async function deleteSuggestion(id) {
+  const { data } = await http.delete(`/api/admin/suggestions/${id}`)
+  return data.data // { id }
+}
+
 export { API_BASE }

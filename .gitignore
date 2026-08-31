@@ -14,6 +14,9 @@ tmp_images/
 # 个人作品库（Spec5 持久目录，重启不清、不受 TTL 影响）
 Server/gallery/
 
+# 社区帖子图片（Spec9 持久目录，与 gallery/ 分开）
+Server/community/
+
 # 本地认证数据库（含 WAL/SHM 伴生文件）
 Server/artcn.db
 Server/artcn.db-wal

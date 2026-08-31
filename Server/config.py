@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 STORAGE_DIR = BASE_DIR / "storage"          # 临时图片目录（/images 静态挂载，TTL 1h）
 GALLERY_DIR = BASE_DIR / "gallery"          # 个人作品库持久目录（Spec5，与 storage/ 无关）
+COMMUNITY_DIR = BASE_DIR / "community"      # 社区帖子图片持久目录（Spec9，与 storage/ 无关）
 STATIC_DIR = BASE_DIR / "static"            # 生产环境挂载 frontend/dist
 
 load_dotenv(BASE_DIR / ".env")
@@ -43,6 +44,11 @@ CORS_ALLOW_ORIGINS = [
     if o.strip()
 ]
 
+# ===== 社区 / 分享 / 建议（Spec9）=====
+SHARE_TTL_SECONDS = int(os.getenv("SHARE_TTL_SECONDS", "604800"))  # 分享链接有效期（默认 7 天）
+COMMUNITY_POST_TEXT_MAX = 1000        # 社区帖子文字上限（前后端同值）
+SUGGESTION_TEXT_MAX = 2000            # 建议文字上限（前后端同值）
+
 # ===== 认证（Spec2：登录 + 用户管理）=====
 JWT_SECRET = os.getenv("JWT_SECRET", "")              # JWT 签名密钥，只放 .env，未配置则启动报错
 JWT_EXPIRE_SECONDS = int(os.getenv("JWT_EXPIRE_SECONDS", "604800"))  # token 有效期（默认 7 天）
@@ -72,4 +78,5 @@ IMAGE_TTL_SECONDS = 3600                     # storage 文件 TTL 1h
 # 启动时确保目录存在
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 GALLERY_DIR.mkdir(parents=True, exist_ok=True)
+COMMUNITY_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)

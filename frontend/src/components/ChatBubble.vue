@@ -42,6 +42,24 @@
           重试
         </button>
       </div>
+
+      <!-- Spec9：工具结果（文生图/图文生图/图像QA）下方 👍/👎 反馈行；再点同一项取消 -->
+      <div v-if="isToolResult" class="bubble-actions">
+        <button
+          class="btn-mini feedback-btn"
+          :class="{ 'feedback-on': message.vote === 'like' }"
+          @click="$emit('vote', message, 'like')"
+        >
+          👍 {{ message.vote === 'like' ? '已觉得有用' : '有用' }}
+        </button>
+        <button
+          class="btn-mini feedback-btn"
+          :class="{ 'feedback-on dislike': message.vote === 'dislike' }"
+          @click="$emit('vote', message, 'dislike')"
+        >
+          👎 {{ message.vote === 'dislike' ? '已觉得没用' : '没用' }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -54,8 +72,44 @@ import { renderMarkdown } from '../utils/markdown'
 const props = defineProps({
   message: { type: Object, required: true }
 })
-defineEmits(['retry'])
+defineEmits(['retry', 'vote'])
 
 // 只在助手文本上渲染 Markdown（用户消息保持纯文本）
 const renderedText = computed(() => renderMarkdown(props.message.text || ''))
+
+// Spec9：三类生成服务的工具结果才渲染反馈行；纯对话、pending、error 不渲染
+const TOOL_RESULTS = ['generate_image', 'edit_image', 'qa_image']
+const isToolResult = computed(() => {
+  const m = props.message
+  return (
+    m.role === 'assistant' &&
+    m.tool &&
+    TOOL_RESULTS.includes(m.tool) &&
+    (m.kind === 'text' || m.kind === 'images')
+  )
+})
 </script>
+
+<style scoped>
+.bubble-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.feedback-btn {
+  font-size: 12px;
+}
+
+.feedback-on {
+  color: #fff;
+  background: var(--purple-600);
+  border-color: var(--purple-600);
+}
+
+.feedback-on.dislike {
+  background: var(--bg-input);
+  border-color: var(--text-muted);
+  color: var(--text-secondary);
+}
+</style>

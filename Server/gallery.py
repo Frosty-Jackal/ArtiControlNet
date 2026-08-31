@@ -43,18 +43,28 @@ def save_gallery_image(image_bytes: bytes, user_id: int, source: str,
     return record
 
 
-def list_user_images(user_id: int, source: str | None = None) -> list[dict]:
-    """本人作品列表（时间倒序），每项带前端可用的 url。"""
-    return [_with_url(it) for it in db.list_image_records(user_id, source)]
+def list_user_images(user_id: int, source: str | None = None,
+                     public_base: str = "") -> list[dict]:
+    """本人作品列表（时间倒序），每项带前端可用的 url 与可空的 share（Spec9 §6.1）。"""
+    return [_with_url(it, public_base) for it in db.list_image_records(user_id, source)]
 
 
-def _with_url(record: dict) -> dict:
+def _with_url(record: dict, public_base: str = "") -> dict:
+    share = db.get_share_by_image(record["id"])
+    share_out = None
+    if share is not None:
+        share_out = {
+            "id": share["id"],
+            "url": f"{public_base}/share/{share['token']}",
+            "expires_at": share["expires_at"],
+        }
     return {
         "id": record["id"],
         "source": record["source"],
         "url": f"/api/gallery/{record['id']}/file",
         "prompt": record["prompt"],
         "created_at": record["created_at"],
+        "share": share_out,
     }
 
 
@@ -81,15 +91,21 @@ def read_gallery_file(item_id: int, user_id: int) -> tuple[dict, bytes]:
     return record, _read_file(record["file_name"])
 
 
+def read_share_image_bytes(file_name: str) -> bytes:
+    """分享页读 gallery/ 原图字节（不复制，Spec9 §2.3）；文件不存在 → 40403。"""
+    return _read_file(file_name)
+
+
 def mime_for(record: dict) -> str:
     return _MIME.get(record["ext"], "application/octet-stream")
 
 
 def delete_item(item_id: int, user_id: int) -> None:
-    """删除作品：校验归属 → 删文件 → 删记录。"""
+    """删除作品：校验归属 → 删文件 → 删记录 → 分享级联失效（Spec9 §5.3）。"""
     record = _get_owned(item_id, user_id)
     _unlink_file(record["file_name"])
     db.delete_image_record(item_id)
+    db.delete_shares_for_image(item_id)     # 删作品 → 其分享自动失效
     logger.info("删除作品", extra={
         "event": "gallery.deleted", "user_id": user_id, "item_id": item_id,
     })
