@@ -577,6 +577,23 @@ async def admin_clear_feedback(request: Request, category: str = "",
     return _ok({"cleared": cleared})
 
 
+@app.post("/api/admin/usage/clear")
+async def admin_clear_usage(request: Request,
+                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """管理员清零四类调用计数（对话/文生图/图文生图/图像QA）并记录清零时间（Spec11）。
+
+    cleared = 清零前四类调用总数（信息性，供日志/提示）；清零即开启一段新的统计区间。
+    """
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    cleared = db.clear_usage()
+    logger.info("清零调用统计", extra={
+        "event": "usage.cleared", "request_id": request_id,
+        "operator": user["username"], "cleared": cleared,
+    })
+    return _ok({"cleared": cleared})
+
+
 # ---------- 作品分享链接（Spec9 §6.1）----------
 
 @app.post("/api/shares")
@@ -838,9 +855,14 @@ async def admin_delete_user(user_id: int, request: Request,
 
 @app.get("/api/admin/stats")
 async def admin_stats(request: Request):
-    """4 类调用聚合统计 + AI 服务反馈汇总（只读；/api/admin/* 限管理员，Spec4 §6.2 / Spec9 §6.1）。"""
+    """4 类调用聚合统计 + AI 服务反馈汇总 + 两个清零时间（只读；/api/admin/* 限管理员）。
+
+    Spec11：额外返回 usage_cleared_at / feedback_cleared_at（null | UTC ISO），
+    供前端展示各统计块"上次清零"的时间起点。
+    """
     stats = db.get_usage_stats()
     stats["feedback_totals"] = db.get_feedback_totals()
+    stats.update(db.get_cleared_times())
     return _ok(stats)
 
 

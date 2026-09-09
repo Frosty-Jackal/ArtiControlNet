@@ -11,9 +11,16 @@
 
     <p v-if="error" class="login-error">{{ error }}</p>
 
-    <p class="admin-notice stats-summary">
-      注册用户 {{ stats.user_count }} 人 · 调用总次数 {{ stats.total_calls }}
-    </p>
+    <!-- Spec11：统计区头部条 = 摘要 + 清零时间 + 清零按钮 -->
+    <div class="usage-head">
+      <p class="admin-notice stats-summary">
+        注册用户 {{ stats.user_count }} 人 · 调用总次数 {{ stats.total_calls }}
+        <span class="cleared-hint">· 上次清零：{{ usageClearedText }}</span>
+      </p>
+      <button class="btn-mini" :disabled="clearingUsage" @click="clearUsageStats">
+        清空调用统计
+      </button>
+    </div>
 
     <div class="admin-table-wrap">
       <table class="user-table">
@@ -39,7 +46,10 @@
     <!-- Spec9：AI 服务反馈汇总（仅统计，不含明细） -->
     <div class="admin-table-wrap feedback-wrap">
       <div class="feedback-head">
-        <h3>AI 服务反馈</h3>
+        <div class="head-titles">
+          <h3>AI 服务反馈</h3>
+          <span class="cleared-hint">上次清零：{{ feedbackClearedText }}</span>
+        </div>
         <button class="btn-mini" :disabled="clearing" @click="clearFeedbackStats">
           清空反馈统计
         </button>
@@ -66,7 +76,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { clearFeedback, getUsageStats } from '../api/chatApi'
+import { clearFeedback, clearUsage, getUsageStats } from '../api/chatApi'
 import { useAuthStore } from '../store/auth'
 
 const emit = defineEmits(['close'])
@@ -78,10 +88,13 @@ const stats = ref({
   totals: {},
   per_user_avg: {},
   shares: {},
-  feedback_totals: {}
+  feedback_totals: {},
+  usage_cleared_at: null,    // Spec11：两个清零时间（null = 从未清零）
+  feedback_cleared_at: null
 })
 const error = ref('')
-const clearing = ref(false)
+const clearing = ref(false)      // 反馈清空进行中
+const clearingUsage = ref(false) // 调用统计清零进行中
 
 // Spec9：三类服务反馈展示顺序
 const FEEDBACK_ROWS = [
@@ -91,6 +104,13 @@ const FEEDBACK_ROWS = [
 ]
 
 const feedbackTotals = computed(() => stats.value.feedback_totals || {})
+
+// Spec11：清零时间格式化；null → 「从未清零」，否则转本地时区
+function fmtCleared(iso) {
+  return iso ? new Date(iso).toLocaleString('zh-CN') : '从未清零'
+}
+const usageClearedText = computed(() => fmtCleared(stats.value.usage_cleared_at))
+const feedbackClearedText = computed(() => fmtCleared(stats.value.feedback_cleared_at))
 
 // 4 类展示顺序（Spec4 §7）
 const CATEGORIES = [
@@ -133,12 +153,52 @@ async function clearFeedbackStats() {
   }
 }
 
+// Spec11：清空调用统计（confirm 一次防误触，成功后刷新；清零不可恢复）
+async function clearUsageStats() {
+  if (!window.confirm('确定清空全部调用统计？对话 / 文生图 / 图文生图 / 图像QA 的计数将归 0，此操作不可撤销。')) return
+  clearingUsage.value = true
+  error.value = ''
+  try {
+    await clearUsage()
+    await load()
+  } catch (e) {
+    error.value = e.message || '清空失败'
+  } finally {
+    clearingUsage.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
 <style scoped>
 .feedback-wrap {
   margin-top: 20px;
+}
+
+/* Spec11：统计区头部条（摘要 + 清零时间 + 清空按钮） */
+.usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.usage-head .admin-notice {
+  margin-bottom: 0;
+}
+
+.usage-head .btn-mini {
+  flex-shrink: 0;
+}
+
+/* Spec11：清零时间小字（两个区域共用） */
+.cleared-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .feedback-head {
@@ -154,5 +214,13 @@ onMounted(load)
   margin: 0;
   font-size: 14px;
   color: var(--text-primary);
+}
+
+/* 反馈区标题 + 清零时间纵排 */
+.head-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 </style>

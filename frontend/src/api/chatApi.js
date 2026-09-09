@@ -204,6 +204,12 @@ export async function clearFeedback(category = '') {
   return data.data // { cleared }
 }
 
+// Spec11：清零四类调用计数（对话/文生图/图文生图/图像QA），记录清零时间
+export async function clearUsage() {
+  const { data } = await http.post('/api/admin/usage/clear')
+  return data.data // { cleared }
+}
+
 // ---- 作品分享链接（Spec9 §6.1）----
 
 export async function createShare(imageId) {

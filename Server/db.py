@@ -124,6 +124,14 @@ CREATE TABLE IF NOT EXISTS suggestions (
     updated_at TEXT NOT NULL
 )
 """
+
+# 通用键值元数据（Spec11 §5.1）：记录各统计块的"上次清零时间"（usage / feedback 各自独立）
+_CREATE_META_TABLE = """
+CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
 _CREATE_SUGGESTIONS_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_suggestions_user "
     "ON suggestions(user_id, created_at DESC)"
@@ -231,6 +239,7 @@ def init_db() -> None:
         conn.execute(_CREATE_SHARES_TABLE)
         conn.execute(_CREATE_SUGGESTIONS_TABLE)
         conn.execute(_CREATE_SUGGESTIONS_INDEX)
+        conn.execute(_CREATE_META_TABLE)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         conn.commit()
@@ -411,6 +420,57 @@ def get_usage_stats() -> dict:
         "per_user_avg": per_user_avg,
         "shares": shares,
     }
+
+
+# ---------- 清零 / 统计区间起点（Spec11 §5.1） ----------
+
+# app_meta 键：值 = UTC ISO 时间，表示"该统计块从何时开始重计"（无该键 = 从未清零）
+USAGE_CLEARED_KEY = "usage_cleared_at"
+FEEDBACK_CLEARED_KEY = "feedback_cleared_at"
+
+
+def _upsert_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """在给定连接内 UPSERT 一条 app_meta（供清空函数同一事务里写时间）。"""
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def get_meta(key: str) -> str | None:
+    """读 app_meta 键值；键不存在返回 None（= 该统计块从未清零）。"""
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def get_cleared_times() -> dict:
+    """usage / feedback 两个"上次清零时间"，供 GET /api/admin/stats 一并返回。"""
+    return {
+        USAGE_CLEARED_KEY: get_meta(USAGE_CLEARED_KEY),
+        FEEDBACK_CLEARED_KEY: get_meta(FEEDBACK_CLEARED_KEY),
+    }
+
+
+def clear_usage() -> int:
+    """清零四类调用计数（删行重计），返回清零前四类调用总次数。
+
+    - 删行而非逐列置 0：清零后首次成功调用由 record_call 的 UPSERT 重建新行、从 0 累计。
+    - 只动 usage 表，users（注册人数）/ images / posts 等一概不碰。
+    - 同事务内记录 usage_cleared_at，作为新一段统计区间的起点。
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(chat), 0) + COALESCE(SUM(generate), 0) "
+            "     + COALESCE(SUM(edit), 0) + COALESCE(SUM(qa), 0) AS total "
+            "FROM usage"
+        ).fetchone()
+        total = int(row["total"])
+        conn.execute("DELETE FROM usage")
+        _upsert_meta(conn, USAGE_CLEARED_KEY, _now_iso())
+        conn.commit()
+    return total
 
 
 # ---------- 个人作品库（Spec5 §5.3） ----------
@@ -650,7 +710,11 @@ def get_feedback_totals() -> dict:
 
 
 def clear_feedback(category: str | None = None) -> int:
-    """清空反馈统计（可 ?category= 单选或全清），返回删除行数。"""
+    """清空反馈统计（可 ?category= 单选或全清），返回删除行数。
+
+    Spec11：**全清（category=None）**时同事务内记录 feedback_cleared_at，作为反馈统计
+    新一段区间的起点；**按类单选清空不更新**——会留下其它类的旧数据，语义上不算"归零重计"。
+    """
     with _connect() as conn:
         if category:
             if category not in _FEEDBACK_CATEGORIES:
@@ -658,6 +722,7 @@ def clear_feedback(category: str | None = None) -> int:
             cur = conn.execute("DELETE FROM feedback WHERE category = ?", (category,))
         else:
             cur = conn.execute("DELETE FROM feedback")
+            _upsert_meta(conn, FEEDBACK_CLEARED_KEY, _now_iso())
         conn.commit()
     return cur.rowcount
 
