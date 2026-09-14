@@ -49,6 +49,11 @@ SHARE_TTL_SECONDS = int(os.getenv("SHARE_TTL_SECONDS", "604800"))  # 分享链�
 COMMUNITY_POST_TEXT_MAX = 1000        # 社区帖子文字上限（前后端同值）
 SUGGESTION_TEXT_MAX = 2000            # 建议文字上限（前后端同值）
 
+# ===== 个人作品风格 Wiki（Spec12）=====
+WIKI_STYLE_MAX = int(os.getenv("WIKI_STYLE_MAX", "2000"))               # 手编 / 生成的风格文本上限（字）
+WIKI_PROMPT_ITEM_MAX = int(os.getenv("WIKI_PROMPT_ITEM_MAX", "500"))    # 单条作品 prompt 提取上限（字）
+WIKI_PROMPT_TOTAL_MAX = int(os.getenv("WIKI_PROMPT_TOTAL_MAX", "6000")) # 一次合并送入 LLM 的参考文字总上限（字）
+
 # ===== 认证（Spec2：登录 + 用户管理）=====
 JWT_SECRET = os.getenv("JWT_SECRET", "")              # JWT 签名密钥，只放 .env，未配置则启动报错
 JWT_EXPIRE_SECONDS = int(os.getenv("JWT_EXPIRE_SECONDS", "604800"))  # token 有效期（默认 7 天）

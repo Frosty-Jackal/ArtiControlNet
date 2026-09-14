@@ -18,7 +18,9 @@ class JsonFormatter(logging.Formatter):
                "provider", "duration_ms", "kind", "username", "target_user",
                # Spec9 社区 / 反馈 / 分享 / 建议事件字段
                "post_id", "vote", "category", "image_id", "suggestion_id",
-               "status", "operator")
+               "status", "operator",
+               # Spec12 个人作品风格 Wiki 事件字段
+               "user_id", "source", "used_count", "style_len", "reason")
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(

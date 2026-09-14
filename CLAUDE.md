@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ArtiControlNet is a **multi-agent AIGC chat workbench** for designers ("基于进化算法的条件扩散模型高效架构探究", a university innovation project). Users describe what they want in natural language (optionally attaching a reference image); a Supervisor agent does a single intent-routing pass, and child agents complete "text-to-image / sketch-to-image / image QA" via **external cloud model APIs**, returning results **directly to the user**.
+ArtiControlNet is a **design-empowering AIGC system** for designers ("基于进化算法的条件扩散模型高效架构探究", a university innovation project). Users describe what they want in natural language (optionally attaching a reference image); a Supervisor agent does a single intent-routing pass, and child agents complete "text-to-image / sketch-to-image / image QA" via **external cloud model APIs**, returning results **directly to the user**.
 
 **Hard constraints**: no local inference, **no database**, only two tiers (frontend + backend). All API keys live in backend env vars only — never in the frontend or committed files. **唯一例外（Spec2）**：登录认证引入一个本地单文件 SQLite `Server/artcn.db` 作为账号库（持久化，与 storage/ 无关）。
 

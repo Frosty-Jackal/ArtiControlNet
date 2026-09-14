@@ -5,7 +5,7 @@
         <span class="brand-dot"></span>
         <h1>ArtiControlNet</h1>
       </div>
-      <p class="login-sub">多智能体 AI 创意工作台 · 登录后使用</p>
+      <p class="login-sub">赋能设计的 AIGC 系统 · 登录后使用</p>
 
       <form class="login-form" @submit.prevent="submit">
         <input

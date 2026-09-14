@@ -25,6 +25,7 @@ import gallery
 import media
 import schemas
 import shares
+import wiki
 from agents.supervisor import run_supervisor
 from errors import (AppError, AuthTokenError, BadRequestError,
                     CredentialsFormatError, FeedbackParamError, FileMissingError,
@@ -446,6 +447,54 @@ async def delete_gallery_item(item_id: int, request: Request):
     user = request.state.user
     gallery.delete_item(item_id, user["id"])
     return _ok({"id": item_id})
+
+
+# ---------- 个人作品风格 Wiki（Spec12 §6.1）----------
+
+@app.get("/api/wiki")
+async def get_wiki(request: Request):
+    """读本人风格 Wiki；行不存在返回全空默认值，不建行（Spec12 §5.2A）。"""
+    return _ok(wiki.get_wiki(request.state.user["id"]))
+
+
+@app.post("/api/wiki/style/refresh")
+async def refresh_wiki_style(request: Request,
+                             x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """基于未纳入过的作品更新风格（同步等 LLM）。
+
+    无待考虑作品 → 200 + updated:false / reason="nothing_new"（正常业务状态，非错误）；
+    上游失败 → 既有 61001 / 61002，wiki 与 images.wiki_used 均不变。
+    """
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    data = await wiki.refresh_style(user["id"])
+    if data["updated"]:
+        logger.info("更新个人作品风格", extra={
+            "event": "wiki.style_updated", "request_id": request_id,
+            "user_id": user["id"], "source": "refresh",
+            "used_count": data["used_count"], "style_len": len(data["style"]),
+        })
+    else:
+        logger.info("无新作品可考虑", extra={
+            "event": "wiki.refresh_skipped", "request_id": request_id,
+            "user_id": user["id"], "reason": data["reason"],
+        })
+    return _ok(data)
+
+
+@app.put("/api/wiki/style")
+async def update_wiki_style(payload: schemas.WikiStyleRequest, request: Request,
+                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """手动覆盖风格：旧值进 prev_style（Spec12 §5.2C）；空 / 超长 → 40014。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    record = wiki.update_style_manually(user["id"], payload.style)
+    logger.info("手动更新个人作品风格", extra={
+        "event": "wiki.style_updated", "request_id": request_id,
+        "user_id": user["id"], "source": "manual", "used_count": 0,
+        "style_len": len(record["style"]),
+    })
+    return _ok(record)
 
 
 # ---------- 社区（Spec9 §6.1）----------

@@ -127,3 +127,11 @@ class SuggestionUpdateRequest(BaseModel):
 
     status: Optional[str] = None        # 'pending' | 'read' | 'resolved'
     reply: Optional[str] = None
+
+
+# ---- 个人作品风格 Wiki（Spec12 §6.1）----
+
+class WikiStyleRequest(BaseModel):
+    """PUT /api/wiki/style 请求体。长度/空值校验在业务层（40014）。"""
+
+    style: str

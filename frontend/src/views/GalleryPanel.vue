@@ -8,6 +8,65 @@
       当前登录：{{ auth.username }} · 我的作品仅本人可见
     </p>
 
+    <!-- 个人作品风格（Spec12 §7.2）：整页的语境，先于作品网格出现 -->
+    <div class="wiki-block">
+      <div class="wiki-head">
+        <h3 class="wiki-title">个人作品风格</h3>
+        <span v-if="wiki.style_updated_at" class="wiki-time">
+          更新于 {{ formatTime(wiki.style_updated_at) }}
+        </span>
+      </div>
+
+      <p v-if="wikiError" class="login-error">{{ wikiError }}</p>
+
+      <p v-if="wiki.style" class="wiki-style">{{ wiki.style }}</p>
+      <p v-else class="wiki-empty">还没有风格记录，点下面的按钮从你的作品里归纳一版。</p>
+
+      <!-- 「上次更新前」：次要信息，小字 + 低对比度 + 折叠两行；点击看全文（Spec13） -->
+      <p
+        v-if="wiki.prev_style"
+        class="wiki-prev"
+        title="点击查看全文"
+        @click="wikiPrevFull = wiki.prev_style"
+      >
+        上次更新前：{{ wiki.prev_style }}
+      </p>
+
+      <p v-if="wikiNotice" class="admin-notice">{{ wikiNotice }}</p>
+
+      <div class="wiki-actions">
+        <button class="btn-mini" :disabled="wikiBusy" @click="refreshStyle">
+          {{ wikiBusy ? '更新中…' : '基于我的新作品更新风格' }}
+        </button>
+        <button v-if="!wikiEditing" class="btn-mini" @click="openEdit">编辑</button>
+      </div>
+
+      <!-- 编辑态：就地改风格，保存即覆盖（旧版落进「上次更新前」） -->
+      <div v-if="wikiEditing" class="wiki-edit">
+        <textarea
+          v-model="wikiDraft"
+          class="wiki-textarea"
+          rows="6"
+          placeholder="写下你的个人作品风格…"
+        ></textarea>
+        <div class="wiki-edit-foot">
+          <span class="wiki-count" :class="{ over: wikiDraft.length > WIKI_STYLE_MAX }">
+            {{ wikiDraft.length }} / {{ WIKI_STYLE_MAX }}
+          </span>
+          <div class="wiki-edit-btns">
+            <button
+              class="btn-mini"
+              :disabled="wikiDraft.length > WIKI_STYLE_MAX || wikiSaving"
+              @click="saveStyle"
+            >
+              保存
+            </button>
+            <button class="btn-clear" @click="cancelEdit">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 来源筛选 Tab（Spec5 §7） -->
     <div class="gallery-tabs">
       <button
@@ -108,12 +167,33 @@
         </div>
       </div>
     </div>
+
+    <!-- 「上次更新前的作品风格」全文弹窗（Spec13）：点截断行打开，可看全文 + 复制 -->
+    <div v-if="wikiPrevFull" class="gallery-lightbox" @click.self="wikiPrevFull = ''">
+      <div class="gallery-lightbox-inner wiki-prev-overlay">
+        <div class="wiki-prev-overlay-head">
+          <h3 class="wiki-prev-overlay-title">上次更新前的个人作品风格</h3>
+          <span class="wiki-prev-overlay-hint">仅供查看 / 复制，不会自动恢复</span>
+        </div>
+        <p class="wiki-prev-overlay-text">{{ wikiPrevFull }}</p>
+        <p v-if="wikiPrevCopyFail" class="wiki-prev-overlay-error">复制失败，请手动选择复制</p>
+        <div class="gallery-lightbox-bar">
+          <button class="btn-mini" @click="copyPrevStyle()">
+            {{ copied ? '已复制 ✓' : '复制全文' }}
+          </button>
+          <button class="btn-clear" @click="wikiPrevFull = ''">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { createShare, deleteGalleryItem, fetchGalleryFile, listGallery, revokeShare } from '../api/chatApi'
+import {
+  createShare, deleteGalleryItem, fetchGalleryFile, getWiki, listGallery,
+  refreshWikiStyle, revokeShare, updateWikiStyle
+} from '../api/chatApi'
 import { useAuthStore } from '../store/auth'
 
 const emit = defineEmits(['close'])
@@ -128,6 +208,8 @@ const TABS = [
 
 const SOURCE_LABELS = { upload: '上传', generate: '文生图', edit: '图文生图' }
 
+const WIKI_STYLE_MAX = 2000 // 与后端 config.WIKI_STYLE_MAX 同值（Spec12 §7.2）
+
 const activeSource = ref('')
 const items = ref([])
 const error = ref('')
@@ -137,6 +219,17 @@ const lightbox = ref(null)
 const promptOverlay = ref(null) // 全文 prompt 弹窗：当前展示的作品记录（Spec6 §5.3）
 const copied = ref(false)
 let objectUrls = [] // 统一回收，避免内存泄漏
+
+// ---- 个人作品风格（Spec12 §7.2）----
+const wiki = ref({ style: '', prev_style: null, style_updated_at: null })
+const wikiError = ref('')
+const wikiNotice = ref('')
+const wikiBusy = ref(false)     // 等 LLM 期间按钮置灰（挡住连点）
+const wikiEditing = ref(false)
+const wikiDraft = ref('')
+const wikiSaving = ref(false)
+const wikiPrevFull = ref('')       // 「上次更新前」全文弹窗的文本快照；非空 = 弹窗打开（Spec13）
+const wikiPrevCopyFail = ref(false)
 
 const emptySuffix = computed(() => {
   const t = TABS.find((x) => x.value === activeSource.value)
@@ -267,10 +360,18 @@ async function copyText(text) {
   } else {
     error.value = '复制失败，请手动选择复制'
   }
+  return ok // Spec13：返回值供弹窗内联提示用（调用方可忽略）
 }
 
 async function copyPrompt(text) {
   await copyText(text)
+}
+
+// 弹窗内复制：失败提示画在弹窗里（页面错误条被遮罩挡住，弹窗开着时看不见）（Spec13）
+async function copyPrevStyle() {
+  wikiPrevCopyFail.value = false
+  const ok = await copyText(wikiPrevFull.value)
+  if (!ok) wikiPrevCopyFail.value = true
 }
 
 // Spec9 §5.3：生成分享链接 → 立即复制到剪贴板（后端返回绝对 URL）
@@ -308,11 +409,229 @@ async function revokeItem(item) {
   }
 }
 
-onMounted(load)
-onBeforeUnmount(releaseThumbs)
+// ---- 个人作品风格（Spec12 §7.2）----
+
+// 风格加载失败只写 wikiError，不阻断作品列表渲染
+async function loadWiki() {
+  wikiError.value = ''
+  try {
+    wiki.value = await getWiki()
+  } catch (e) {
+    wikiError.value = e.message || '加载个人作品风格失败'
+  }
+}
+
+// 基于未纳入过的作品更新风格：同步等 LLM（按钮期间置灰）
+async function refreshStyle() {
+  if (wikiBusy.value) return
+  wikiBusy.value = true
+  wikiError.value = ''
+  wikiNotice.value = ''
+  try {
+    const d = await refreshWikiStyle()
+    if (d.updated) {
+      wiki.value = {
+        ...wiki.value,
+        style: d.style,
+        prev_style: d.prev_style,
+        style_updated_at: d.style_updated_at
+      }
+      let msg = `已根据 ${d.used_count} 张作品更新风格`
+      if (d.pending_count > 0) msg += `，还有 ${d.pending_count} 张作品因篇幅限制未纳入`
+      wikiNotice.value = msg
+    } else {
+      // 「所有作品已全部考虑到」是正常业务状态，不是错误
+      window.alert('所有作品已全部考虑到')
+    }
+  } catch (e) {
+    wikiError.value = e.message || '更新风格失败'
+  } finally {
+    wikiBusy.value = false
+  }
+}
+
+function openEdit() {
+  wikiEditing.value = true
+  wikiDraft.value = wiki.value.style || ''
+  wikiError.value = ''
+  wikiNotice.value = ''
+}
+
+function cancelEdit() {
+  wikiEditing.value = false
+  wikiDraft.value = ''
+}
+
+// 手动覆盖风格：旧版自动落进「上次更新前」，属准不可逆操作 → confirm 一次
+async function saveStyle() {
+  const text = wikiDraft.value.trim()
+  if (!text) {
+    wikiNotice.value = '风格内容不能为空'
+    return
+  }
+  if (wikiDraft.value.length > WIKI_STYLE_MAX) return
+  if (!window.confirm('确定用这段文字覆盖当前的个人作品风格？原风格会存入"上次更新前"。')) return
+  wikiSaving.value = true
+  wikiError.value = ''
+  wikiNotice.value = ''
+  try {
+    wiki.value = await updateWikiStyle(text)
+    wikiEditing.value = false
+    wikiDraft.value = ''
+    wikiNotice.value = '已保存'
+  } catch (e) {
+    wikiError.value = e.message || '保存失败'
+  } finally {
+    wikiSaving.value = false
+  }
+}
+
+// Esc 关闭：按栈序关最上面那层（风格全文 → prompt 全文 → 大图）（Spec13）
+function onKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (wikiPrevFull.value) wikiPrevFull.value = ''
+  else if (promptOverlay.value) promptOverlay.value = null
+  else if (lightbox.value) lightbox.value = null
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  // 风格与作品互不依赖，并发发起（切 Tab 只重拉作品列表，不重拉风格）
+  loadWiki()
+  load()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  releaseThumbs()
+})
 </script>
 
 <style scoped>
+/* ---------- 个人作品风格 Block（Spec12 §7.3）---------- */
+
+.wiki-block {
+  margin-bottom: 20px;
+  padding: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+}
+
+.wiki-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.wiki-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wiki-time {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.wiki-style {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wiki-empty {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+/* 上次更新前：明确是次要信息（更小字号 + 低对比度 + 折叠两行）；点击看全文（Spec13） */
+.wiki-prev {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-all;
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.wiki-prev:hover {
+  color: var(--text-secondary); /* 稍亮提示"可点"，仍明显弱于主风格的 --text-primary */
+}
+
+.wiki-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.wiki-edit {
+  margin-top: 12px;
+}
+
+.wiki-textarea {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  resize: vertical;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+  transition: border-color var(--transition-normal);
+}
+
+.wiki-textarea:focus {
+  outline: none;
+  border-color: var(--purple-500);
+}
+
+.wiki-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.wiki-edit-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.wiki-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.wiki-count.over {
+  color: #fca5a5;
+  font-weight: 600;
+}
+
+.wiki-edit-btns {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- 作品网格 ---------- */
+
 .gallery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -407,12 +726,14 @@ onBeforeUnmount(releaseThumbs)
   color: var(--text-primary);
 }
 
-.prompt-overlay {
+.prompt-overlay,
+.wiki-prev-overlay {
   max-width: 640px;
   width: 100%;
 }
 
-.prompt-overlay-text {
+.prompt-overlay-text,
+.wiki-prev-overlay-text {
   margin: 0;
   padding: 16px;
   max-height: 60vh;
@@ -425,6 +746,34 @@ onBeforeUnmount(releaseThumbs)
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 「上次更新前」全文弹窗（Spec13） */
+.wiki-prev-overlay-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.wiki-prev-overlay-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wiki-prev-overlay-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.wiki-prev-overlay-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #fca5a5;
 }
 
 .gallery-actions {

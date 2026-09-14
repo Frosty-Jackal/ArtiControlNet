@@ -13,7 +13,7 @@
         <h1>ArtiControlNet</h1>
       </div>
       <span class="brand-sub">
-        多智能体 AI 创意工作台 · {{ auth.username }}
+        赋能设计的 AIGC 系统 · {{ auth.username }}
       </span>
       <button class="btn-clear" @click="toggleGallery">
         {{ showGallery ? '返回聊天' : '我的作品' }}

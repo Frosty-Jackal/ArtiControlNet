@@ -2,7 +2,7 @@
 
 ![ArtiControlNet](./GithubPage/cover.jpg)
 
-ArtiControlNet 是一款依托 AI 能力辅助设计师创作的定制化 AIGC 产品：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」等任务。
+ArtiControlNet 是一款赋能设计的 AIGC 系统：用自然语言（可带参考图）提出需求，主 Agent 分发，子 Agent 通过**云端模型 API** 完成「文生图 / 线稿生图 / 图像问答」等任务。
 仅前端 + 后端两层（登录账号存本地 SQLite `artcn.db`）。详细设计见 [Spec.md](./specs/Spec.md)。
 
 > **网站由后端托管，日常使用只需启动后端；前端只在改代码时才需要碰。**
@@ -41,7 +41,7 @@ cd Server
 .venv/Scripts/python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-启动后打开 **http://localhost:8000** 就是完整的工作台——前端页面和后端接口都由这一个进程提供，**不需要另外启动前端**。
+启动后打开 **http://localhost:8000** 就是完整的系统——前端页面和后端接口都由这一个进程提供，**不需要另外启动前端**。
 
 ## 三、让别人访问：公开链接（cloudflared 隧道，无需服务器/域名）
 

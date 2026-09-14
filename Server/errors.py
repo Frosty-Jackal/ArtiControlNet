@@ -139,6 +139,15 @@ class SuggestionContentError(BadRequestError):
         super().__init__(message, code=40013)
 
 
+# ---- 个人作品风格 Wiki（Spec12 §9，追加到 Spec9 §9 之后）----
+
+class WikiContentError(BadRequestError):
+    """风格内容非法（手动编辑提交的文本 strip 后为空、或超过 WIKI_STYLE_MAX）。"""
+
+    def __init__(self, message="风格内容非法"):
+        super().__init__(message, code=40014)
+
+
 class PostForbiddenError(AppError):
     """无权操作该帖子（非作者且非管理员删除他人帖子）。"""
 

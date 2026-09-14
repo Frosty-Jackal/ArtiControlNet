@@ -25,6 +25,9 @@ Server/artcn.db-shm
 # 本地 API 手册（含真实密钥，仅本地参考）
 API's Usage/
 
+# 个人面经（仅本地留存，勿提交）
+产品面经.txt
+
 # Python
 __pycache__/
 *.py[cod]

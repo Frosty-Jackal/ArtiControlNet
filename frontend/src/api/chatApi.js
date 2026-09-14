@@ -157,6 +157,24 @@ export async function deleteGalleryItem(id) {
   return data.data // { id }
 }
 
+// ---- 个人作品风格 Wiki（Spec12 §7.1）----
+
+export async function getWiki() {
+  const { data } = await http.get('/api/wiki')
+  return data.data // { style, prev_style, style_updated_at, updated_at }
+}
+
+export async function refreshWikiStyle() {
+  const { data } = await http.post('/api/wiki/style/refresh')
+  // { updated, reason, style, prev_style, style_updated_at, used_count, pending_count }
+  return data.data
+}
+
+export async function updateWikiStyle(style) {
+  const { data } = await http.put('/api/wiki/style', { style })
+  return data.data // 同 getWiki() 的 data
+}
+
 // ---- 社区（Spec9 §6.1）----
 
 // multipart：text 必填；图片来源二选一 gallery_id（作品库）或 file（新上传）

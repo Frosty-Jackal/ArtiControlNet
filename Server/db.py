@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS usage (
 _USAGE_CATEGORIES = ("chat", "generate", "edit", "qa")
 
 # 个人作品库表（Spec5 §5.3）：文件与元数据分离，文件字节在 Server/gallery/。
+# wiki_used（Spec12 §5.1b）：该作品是否已被纳入过个人风格更新（1 = 已考虑）。
 _CREATE_IMAGES_TABLE = """
 CREATE TABLE IF NOT EXISTS images (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS images (
     file_name  TEXT NOT NULL,
     ext        TEXT NOT NULL,
     prompt     TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    wiki_used  INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -137,11 +139,26 @@ _CREATE_SUGGESTIONS_INDEX = (
     "ON suggestions(user_id, created_at DESC)"
 )
 
+# 个人作品风格 Wiki（Spec12 §5.1a）：每用户一行，成对保存「当前风格」与「上次更新前的风格」
+_CREATE_WIKI_TABLE = """
+CREATE TABLE IF NOT EXISTS wiki (
+    user_id          INTEGER PRIMARY KEY,
+    style            TEXT NOT NULL DEFAULT '',   -- 当前「个人作品风格」（空串 = 尚未建立）
+    prev_style       TEXT,                       -- 「上次更新前的个人作品风格」（NULL = 从未更新过）
+    style_updated_at TEXT,                       -- 当前风格的产生时刻（UTC ISO；NULL = 尚未建立）
+    updated_at       TEXT                        -- 本行最后修改时刻（UTC ISO）
+)
+"""
+
 # 反馈类别白名单（set_feedback 校验，不拼接外部输入）
 _FEEDBACK_CATEGORIES = ("generate", "edit", "qa")
 _FEEDBACK_VOTES = ("like", "dislike")
 # 建议状态白名单（update_suggestion 校验）
 _SUGGESTION_STATUSES = ("pending", "resolved")  # Spec10：收敛两态，去掉 read / 待用户处理
+
+# 待考虑作品来源白名单（Spec12 §5.2B）：只有生成/绘图作品带 prompt；
+# 上传作品（source='upload'）的 prompt 为 NULL，提取时跳过、更新时"视为已考虑"。
+_PENDING_SOURCES = ("generate", "edit")
 
 
 def _now_iso() -> str:
@@ -177,6 +194,7 @@ def _image_row_to_dict(row: sqlite3.Row | None) -> dict | None:
         "ext": row["ext"],
         "prompt": row["prompt"],
         "created_at": row["created_at"],
+        "wiki_used": bool(row["wiki_used"]),   # Spec12：是否已纳入过个人风格更新
     }
 
 
@@ -207,6 +225,18 @@ def _share_row_to_dict(row: sqlite3.Row | None) -> dict | None:
     }
 
 
+def _wiki_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "user_id": row["user_id"],
+        "style": row["style"],
+        "prev_style": row["prev_style"],
+        "style_updated_at": row["style_updated_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def _suggestion_row_to_dict(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
@@ -222,6 +252,20 @@ def _suggestion_row_to_dict(row: sqlite3.Row | None) -> dict | None:
 
 
 # ---------- 生命周期 ----------
+
+def _migrate_images_wiki_used(conn: sqlite3.Connection) -> None:
+    """存量库补列（Spec12 §5.1b）：PRAGMA 查得无 wiki_used 才 ALTER，幂等。
+
+    新建库由 _CREATE_IMAGES_TABLE 自带该列，此分支只服务已存在的 artcn.db，
+    两条路径最终 schema 一致。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)").fetchall()}
+    if "wiki_used" not in cols:
+        conn.execute(
+            "ALTER TABLE images ADD COLUMN wiki_used INTEGER NOT NULL DEFAULT 0"
+        )
+        logger.info("images.wiki_used 列已补齐", extra={"event": "db.migrate"})
+
 
 def init_db() -> None:
     """建表；users 表为空时按 .env 配置创建初始管理员。"""
@@ -240,8 +284,11 @@ def init_db() -> None:
         conn.execute(_CREATE_SUGGESTIONS_TABLE)
         conn.execute(_CREATE_SUGGESTIONS_INDEX)
         conn.execute(_CREATE_META_TABLE)
+        conn.execute(_CREATE_WIKI_TABLE)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
+        # Spec12 §5.1b：存量库补 images.wiki_used 列
+        _migrate_images_wiki_used(conn)
         conn.commit()
     if count_users() > 0:
         return
@@ -337,8 +384,8 @@ def set_admin(user_id: int, is_admin: bool) -> bool:
 
 
 def delete_user(user_id: int) -> bool:
-    """删除用户；连带删除其 usage / images / 社区 / 反馈 / 分享 / 建议记录，保证口径一致
-    （Spec4 §3 / Spec5 §3 / Spec9 §3）。
+    """删除用户；连带删除其 usage / images / 社区 / 反馈 / 分享 / 建议 / wiki 记录，
+    保证口径一致（Spec4 §3 / Spec5 §3 / Spec9 §3 / Spec12 §5.3）。
 
     注意：仅删除数据库记录。gallery/ 物理文件由 gallery.delete_user_gallery 负责、
     community/ 物理文件由 community.delete_user_posts 负责（都先取文件名再删文件，
@@ -352,6 +399,7 @@ def delete_user(user_id: int) -> bool:
         conn.execute("DELETE FROM feedback WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM shares WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM suggestions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM wiki WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM posts WHERE user_id = ?", (user_id,))
         cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
@@ -866,3 +914,94 @@ def delete_suggestion(suggestion_id: int) -> bool:
         cur = conn.execute("DELETE FROM suggestions WHERE id = ?", (suggestion_id,))
         conn.commit()
     return cur.rowcount > 0
+
+
+# ---------- 个人作品风格 Wiki（Spec12 §5.1 / §5.2） ----------
+
+def get_wiki(user_id: int) -> dict:
+    """读本人 Wiki；行不存在返回全空默认值，**不建行**（读操作不写库，Spec12 §5.2A）。"""
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM wiki WHERE user_id = ?", (user_id,)).fetchone()
+    return _wiki_row_to_dict(row) or {
+        "user_id": user_id,
+        "style": "",
+        "prev_style": None,
+        "style_updated_at": None,
+        "updated_at": None,
+    }
+
+
+def list_pending_style_images(user_id: int) -> list[dict]:
+    """待考虑作品（Spec12 §5.2B）：source ∈ {generate, edit} 且 wiki_used = 0，时间倒序。
+
+    只取归纳所需的字段；上传作品（source='upload'）不在此列——它们没有 prompt，
+    在更新时另行"视为已考虑"。
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, prompt, created_at FROM images "
+            "WHERE user_id = ? AND source IN (?, ?) AND wiki_used = 0 "
+            "ORDER BY created_at DESC, id DESC",
+            (user_id, *_PENDING_SOURCES),
+        ).fetchall()
+    return [{"id": r["id"], "prompt": r["prompt"], "created_at": r["created_at"]} for r in rows]
+
+
+def _upsert_wiki(conn: sqlite3.Connection, user_id: int, style: str,
+                 prev_style: str | None, now: str) -> None:
+    """在给定连接内写 wiki 行（行不存在则 INSERT，Spec12 §5.2B 第 5 步）。"""
+    conn.execute(
+        "INSERT INTO wiki (user_id, style, prev_style, style_updated_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET "
+        "style = excluded.style, prev_style = excluded.prev_style, "
+        "style_updated_at = excluded.style_updated_at, updated_at = excluded.updated_at",
+        (user_id, style, prev_style, now, now),
+    )
+
+
+def _mark_images_wiki_used(conn: sqlite3.Connection, user_id: int,
+                           image_ids: list[int]) -> int:
+    """把本次真正纳入合并的作品标记为已用于更新（同一事务内）。"""
+    if not image_ids:
+        return 0
+    placeholders = ", ".join("?" for _ in image_ids)
+    cur = conn.execute(
+        f"UPDATE images SET wiki_used = 1 "  # noqa: S608（占位符数量由入参长度生成，不含外部文本）
+        f"WHERE user_id = ? AND id IN ({placeholders})",
+        (user_id, *image_ids),
+    )
+    return cur.rowcount
+
+
+def _mark_uploaded_wiki_used(conn: sqlite3.Connection, user_id: int) -> int:
+    """上传作品一并"视为已考虑"（Spec12 §2）：否则传过图的用户永远剩着未考虑的图。"""
+    cur = conn.execute(
+        "UPDATE images SET wiki_used = 1 "
+        "WHERE user_id = ? AND source = 'upload' AND wiki_used = 0",
+        (user_id,),
+    )
+    return cur.rowcount
+
+
+def commit_style_update(user_id: int, style: str,
+                        used_image_ids: list[int] | None = None) -> dict:
+    """写风格：单事务内 upsert wiki（旧 style → prev_style）+ 标记作品（Spec12 §5.3）。
+
+    - `used_image_ids=None`：手动编辑路径，只写 wiki，**不触碰** images.wiki_used。
+    - `used_image_ids=[...]`：按钮更新路径，标记这些作品为已用，并顺带把该用户其余
+      source='upload' 且未标记的作品一并标记为已考虑。
+
+    上游调用失败时不会走到这里，故不存在"作品被标记但风格没更新"的中间态。
+    返回写入后的 wiki 记录（含新的 prev_style / style_updated_at）。
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        row = conn.execute("SELECT style FROM wiki WHERE user_id = ?", (user_id,)).fetchone()
+        prev_style = row["style"] if row is not None else ""   # 首次更新：prev_style 存空串
+        _upsert_wiki(conn, user_id, style, prev_style, now)
+        if used_image_ids is not None:
+            _mark_images_wiki_used(conn, user_id, used_image_ids)
+            _mark_uploaded_wiki_used(conn, user_id)
+        conn.commit()
+    return get_wiki(user_id)

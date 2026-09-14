@@ -1,9 +1,9 @@
 @echo off
-title ArtiControlNet AIGC Workbench
+title ArtiControlNet (Design-Empowering AIGC System)
 cd /d "%~dp0"
 
 echo ============================================================
-echo   ArtiControlNet AIGC Workbench - One-click launcher
+echo   ArtiControlNet (Design-Empowering AIGC System) - One-click launcher
 echo   Close this window to STOP the program
 echo ============================================================
 echo.
