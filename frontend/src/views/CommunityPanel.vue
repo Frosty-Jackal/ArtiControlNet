@@ -621,8 +621,10 @@ onBeforeUnmount(() => {
 .community-modal-img {
   display: block;
   width: 100%;
-  /* Spec17 §14.1：60vh 会把带图帖的评论区挤成 0 高，收到 45vh 给固定内容留余量 */
-  max-height: 45vh;
+  /* Spec17 §14.1：60vh 会把带图帖的评论区挤成 0 高，收到 40vh 给固定内容留余量。
+     40vh 是实测定下的：图片 0.40vh + 正文固定 301px ≤ 弹窗 0.92vh ⟺ 视口高 ≥ 580px，
+     即 768px 窗口（视口 668）下评论区和输入框同屏；45vh 在那里差 33px，输入框掉出折叠线。 */
+  max-height: 40vh;
   object-fit: contain;
   background: var(--bg-input);
   flex-shrink: 0;
