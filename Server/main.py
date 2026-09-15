@@ -425,6 +425,36 @@ async def list_gallery(request: Request, source: str = ""):
     return _ok({"items": items})
 
 
+@app.post("/api/gallery")
+async def create_gallery_item(request: Request, file: UploadFile = File(...),
+                              note: str = Form(default="")):
+    """作品库直传（Spec16 §6.1）：multipart file 必填 + note 可选。
+
+    与 /api/images 的区别：那条是**聊天附件**通道，额外写临时 storage/ 并返回 image_url；
+    这条只往持久作品库放一张图——不写 storage/、不产生 task、不计 usage。
+    备注长度校验在业务层（40015），路由层只做 content_type 白名单。
+    """
+    data = await file.read()
+    if file.content_type and file.content_type not in config.ALLOWED_IMAGE_MIME:
+        raise UnsupportedImageTypeError(f"不支持的图片格式: {file.content_type}")
+    media.validate_upload(data)                        # 40002 / 40003 / 40004
+    item = gallery.create_upload(data, request.state.user["id"], note,
+                                 _public_base(request))
+    return _ok(item)
+
+
+@app.put("/api/gallery/{item_id}/note")
+async def update_gallery_note(item_id: int, payload: schemas.GalleryNoteUpdateRequest,
+                              request: Request):
+    """改 / 清空本人上传作品的备注（Spec16 §6.2）：note 传空串即清空。
+
+    非上传作品（生成/绘图）→ 40015；不存在 / 非本人 → 40403；超长 → 40015。
+    """
+    item = gallery.update_note(item_id, request.state.user["id"], payload.note,
+                               _public_base(request))
+    return _ok(item)
+
+
 @app.get("/api/gallery/{item_id}/file")
 async def gallery_file(item_id: int, request: Request, download: bool = False):
     """查看原图：带 token 拉取（<img> 无法带 Authorization 头，前端用 blob 渲染）。
@@ -473,12 +503,17 @@ async def refresh_wiki_style(request: Request,
             "event": "wiki.style_updated", "request_id": request_id,
             "user_id": user["id"], "source": "refresh",
             "used_count": data["used_count"], "style_len": len(data["style"]),
+            "upload_analyzed": data["upload_analyzed"],
+            "upload_failed": data["upload_failed"],
         })
     else:
-        logger.info("无新作品可考虑", extra={
+        extra = {
             "event": "wiki.refresh_skipped", "request_id": request_id,
             "user_id": user["id"], "reason": data["reason"],
-        })
+        }
+        if data["reason"] == "analysis_failed":
+            extra["upload_failed"] = data["upload_failed"]
+        logger.info("本次无可用材料", extra=extra)
     return _ok(data)
 
 
@@ -493,6 +528,7 @@ async def update_wiki_style(payload: schemas.WikiStyleRequest, request: Request,
         "event": "wiki.style_updated", "request_id": request_id,
         "user_id": user["id"], "source": "manual", "used_count": 0,
         "style_len": len(record["style"]),
+        "upload_analyzed": 0, "upload_failed": 0,
     })
     return _ok(record)
 

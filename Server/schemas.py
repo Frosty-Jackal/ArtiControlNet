@@ -135,3 +135,11 @@ class WikiStyleRequest(BaseModel):
     """PUT /api/wiki/style 请求体。长度/空值校验在业务层（40014）。"""
 
     style: str
+
+
+# ---- 作品备注（Spec16 §6.2）----
+
+class GalleryNoteUpdateRequest(BaseModel):
+    """PUT /api/gallery/{item_id}/note 请求体。长度校验在业务层（40015）。"""
+
+    note: str

@@ -148,6 +148,15 @@ class WikiContentError(BadRequestError):
         super().__init__(message, code=40014)
 
 
+# ---- 作品备注（Spec16 §9，追加到 Spec12 §9 之后）----
+
+class GalleryNoteError(BadRequestError):
+    """作品备注非法（上传作品才可写备注；或备注超过 GALLERY_NOTE_MAX）。"""
+
+    def __init__(self, message="作品备注非法"):
+        super().__init__(message, code=40015)
+
+
 class PostForbiddenError(AppError):
     """无权操作该帖子（非作者且非管理员删除他人帖子）。"""
 

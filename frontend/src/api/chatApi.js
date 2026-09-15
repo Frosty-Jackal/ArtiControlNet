@@ -157,6 +157,23 @@ export async function deleteGalleryItem(id) {
   return data.data // { id }
 }
 
+// ---- 我的作品直传 / 备注（Spec16 §7.1）----
+
+// 作品库直传：multipart，note 可选（空则不 append，后端按"无备注"处理）
+export async function uploadGalleryImage(file, note = '') {
+  const form = new FormData()
+  form.append('file', file)
+  if (note) form.append('note', note)
+  const { data } = await http.post('/api/gallery', form)
+  return data.data // 与 listGallery 的 items[] 同形
+}
+
+// 改 / 清空备注（note='' 即清空）
+export async function updateGalleryNote(id, note) {
+  const { data } = await http.put(`/api/gallery/${id}/note`, { note })
+  return data.data // 同形作品项
+}
+
 // ---- 个人作品风格 Wiki（Spec12 §7.1）----
 
 export async function getWiki() {

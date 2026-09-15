@@ -54,6 +54,14 @@ WIKI_STYLE_MAX = int(os.getenv("WIKI_STYLE_MAX", "2000"))               # 手编
 WIKI_PROMPT_ITEM_MAX = int(os.getenv("WIKI_PROMPT_ITEM_MAX", "500"))    # 单条作品 prompt 提取上限（字）
 WIKI_PROMPT_TOTAL_MAX = int(os.getenv("WIKI_PROMPT_TOTAL_MAX", "6000")) # 一次合并送入 LLM 的参考文字总上限（字）
 
+# ---- 上传作品纳入风格（Spec15）----
+WIKI_UPLOAD_QA_MAX = int(os.getenv("WIKI_UPLOAD_QA_MAX", "10"))                 # 单次刷新最多分析的上传图张数
+WIKI_UPLOAD_QA_CONCURRENCY = int(os.getenv("WIKI_UPLOAD_QA_CONCURRENCY", "3"))  # 视觉 QA 并发路数
+WIKI_UPLOAD_ANSWER_MAX = int(os.getenv("WIKI_UPLOAD_ANSWER_MAX", "300"))        # 单条上传图分析结果的截断上限（字）
+WIKI_UPLOAD_QA_MAX_SIDE = int(os.getenv("WIKI_UPLOAD_QA_MAX_SIDE", "1024"))     # 送模型前缩放的最长边（px）
+# 调参建议：WIKI_UPLOAD_QA_MAX × WIKI_UPLOAD_ANSWER_MAX 宜 ≤ WIKI_PROMPT_TOTAL_MAX（默认 10×300=3000 ≤ 6000）
+# WIKI_UPLOAD_QA_MAX=0 是合法但特殊的取值：上传作品永远轮不到分析（临时关掉上传分析的排障开关，非常规配置）
+
 # ===== 认证（Spec2：登录 + 用户管理）=====
 JWT_SECRET = os.getenv("JWT_SECRET", "")              # JWT 签名密钥，只放 .env，未配置则启动报错
 JWT_EXPIRE_SECONDS = int(os.getenv("JWT_EXPIRE_SECONDS", "604800"))  # token 有效期（默认 7 天）
@@ -79,6 +87,8 @@ ALLOWED_IMAGE_MIME = {
     "image/jpeg", "image/png", "image/webp", "image/gif",
 }
 IMAGE_TTL_SECONDS = 3600                     # storage 文件 TTL 1h
+GALLERY_NOTE_MAX = int(os.getenv("GALLERY_NOTE_MAX", "200"))   # 上传作品备注字数上限（Spec16）
+# 注意：前端 GalleryPanel.vue 的 GALLERY_NOTE_MAX 是同值副本，改这里必须同步改前端
 
 # 启动时确保目录存在
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)

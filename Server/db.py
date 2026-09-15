@@ -44,6 +44,7 @@ _USAGE_CATEGORIES = ("chat", "generate", "edit", "qa")
 
 # 个人作品库表（Spec5 §5.3）：文件与元数据分离，文件字节在 Server/gallery/。
 # wiki_used（Spec12 §5.1b）：该作品是否已被纳入过个人风格更新（1 = 已考虑）。
+# note（Spec16 §5.1a）：上传作品的备注（用户自写；生成/绘图作品恒为 NULL，与 prompt 互斥）。
 _CREATE_IMAGES_TABLE = """
 CREATE TABLE IF NOT EXISTS images (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS images (
     file_name  TEXT NOT NULL,
     ext        TEXT NOT NULL,
     prompt     TEXT,
+    note       TEXT,
     created_at TEXT NOT NULL,
     wiki_used  INTEGER NOT NULL DEFAULT 0
 )
@@ -156,9 +158,12 @@ _FEEDBACK_VOTES = ("like", "dislike")
 # 建议状态白名单（update_suggestion 校验）
 _SUGGESTION_STATUSES = ("pending", "resolved")  # Spec10：收敛两态，去掉 read / 待用户处理
 
-# 待考虑作品来源白名单（Spec12 §5.2B）：只有生成/绘图作品带 prompt；
-# 上传作品（source='upload'）的 prompt 为 NULL，提取时跳过、更新时"视为已考虑"。
-_PENDING_SOURCES = ("generate", "edit")
+# 待考虑作品来源白名单（Spec15 §5.1）：生成/绘图作品带 prompt，上传作品带图片字节
+# （走视觉 QA 逐张分析）。三者同一套 wiki_used 语义——真的被纳入过才置 1。
+_PENDING_SOURCES = ("generate", "edit", "upload")
+
+# app_meta 键：值 = UTC ISO 时间，表示"存量上传作品已放回待考虑队列"（Spec15 §5.1b）
+WIKI_UPLOAD_MIGRATED_KEY = "wiki_upload_migrated"
 
 
 def _now_iso() -> str:
@@ -193,6 +198,7 @@ def _image_row_to_dict(row: sqlite3.Row | None) -> dict | None:
         "file_name": row["file_name"],
         "ext": row["ext"],
         "prompt": row["prompt"],
+        "note": row["note"],                   # Spec16：上传作品的备注（可空）
         "created_at": row["created_at"],
         "wiki_used": bool(row["wiki_used"]),   # Spec12：是否已纳入过个人风格更新
     }
@@ -267,6 +273,38 @@ def _migrate_images_wiki_used(conn: sqlite3.Connection) -> None:
         logger.info("images.wiki_used 列已补齐", extra={"event": "db.migrate"})
 
 
+def _migrate_upload_wiki_used(conn: sqlite3.Connection) -> None:
+    """Spec15 §5.1b：旧口径把上传作品无条件标记为"已考虑"（假账），放回待考虑队列。
+
+    幂等保护：app_meta 里有键就不再执行——否则每次重启都会把 Spec15 之后
+    新标记的上传图重置回 0，同一张图被反复重分析。
+    """
+    row = conn.execute(
+        "SELECT value FROM app_meta WHERE key = ?", (WIKI_UPLOAD_MIGRATED_KEY,)
+    ).fetchone()
+    if row is not None:
+        return
+    cur = conn.execute("UPDATE images SET wiki_used = 0 WHERE source = 'upload'")
+    _upsert_meta(conn, WIKI_UPLOAD_MIGRATED_KEY, _now_iso())
+    conn.commit()
+    logger.info("存量上传作品已放回待考虑队列", extra={
+        "event": "wiki.upload_migrated", "affected": cur.rowcount,
+    })
+
+
+def _migrate_images_note(conn: sqlite3.Connection) -> None:
+    """存量库补列（Spec16 §5.1b）：PRAGMA 查得无 note 才 ALTER，幂等。
+
+    新建库由 _CREATE_IMAGES_TABLE 自带该列，此分支只服务已存在的 artcn.db。
+    两条路径的**列顺序不同**（存量库把 note 追加在末尾），但所有读取一律按
+    列名取值（`row["note"]`），行为无差别。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)").fetchall()}
+    if "note" not in cols:
+        conn.execute("ALTER TABLE images ADD COLUMN note TEXT")
+        logger.info("images.note 列已补齐", extra={"event": "db.migrate"})
+
+
 def init_db() -> None:
     """建表；users 表为空时按 .env 配置创建初始管理员。"""
     AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +327,10 @@ def init_db() -> None:
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         # Spec12 §5.1b：存量库补 images.wiki_used 列
         _migrate_images_wiki_used(conn)
+        # Spec15 §5.1b：存量上传作品放回待考虑队列（必须在 app_meta 建表之后）
+        _migrate_upload_wiki_used(conn)
+        # Spec16 §5.1b：存量库补 images.note 列
+        _migrate_images_note(conn)
         conn.commit()
     if count_users() > 0:
         return
@@ -524,17 +566,36 @@ def clear_usage() -> int:
 # ---------- 个人作品库（Spec5 §5.3） ----------
 
 def add_image_record(user_id: int, source: str, file_name: str,
-                     ext: str, prompt: str | None) -> dict:
-    """写一条作品记录，返回完整记录 dict。"""
+                     ext: str, prompt: str | None,
+                     note: str | None = None) -> dict:
+    """写一条作品记录，返回完整记录 dict。
+
+    note（Spec16）只有作品库直传路径会传；既有 4 处调用都是位置传参、不带它，
+    默认值 None 使它们一行都不用改。
+    """
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO images (user_id, source, file_name, ext, prompt, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, source, file_name, ext, prompt, _now_iso()),
+            "INSERT INTO images (user_id, source, file_name, ext, prompt, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, source, file_name, ext, prompt, note, _now_iso()),
         )
         conn.commit()
         image_id = cur.lastrowid
     return get_image_record(image_id)
+
+
+def set_image_note(image_id: int, note: str | None) -> bool:
+    """改写某作品的备注（Spec16 §5.2C）；note=None 即清空备注。
+
+    只动 note 一列——created_at 不变，所以列表排序位置不变；wiki_used 不碰。
+    归属校验由调用方（gallery.update_note 的 _get_owned）负责。
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE images SET note = ? WHERE id = ?", (note, image_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
 
 
 def get_image_record(image_id: int) -> dict | None:
@@ -932,19 +993,24 @@ def get_wiki(user_id: int) -> dict:
 
 
 def list_pending_style_images(user_id: int) -> list[dict]:
-    """待考虑作品（Spec12 §5.2B）：source ∈ {generate, edit} 且 wiki_used = 0，时间倒序。
+    """待考虑作品（Spec15 §5.2B）：source ∈ {generate, edit, upload} 且 wiki_used = 0，时间倒序。
 
-    只取归纳所需的字段；上传作品（source='upload'）不在此列——它们没有 prompt，
-    在更新时另行"视为已考虑"。
+    三种来源一视同仁：生成/绘图作品提供 prompt，上传作品提供图片字节（调用方按 source
+    分组，上传图走视觉 QA 逐张分析，见 wiki._analyze_uploads）。
     """
+    placeholders = ", ".join("?" for _ in _PENDING_SOURCES)
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, prompt, created_at FROM images "
-            "WHERE user_id = ? AND source IN (?, ?) AND wiki_used = 0 "
+            f"SELECT id, source, file_name, prompt, created_at FROM images "  # noqa: S608（占位符由白名单长度生成）
+            f"WHERE user_id = ? AND source IN ({placeholders}) AND wiki_used = 0 "
             "ORDER BY created_at DESC, id DESC",
             (user_id, *_PENDING_SOURCES),
         ).fetchall()
-    return [{"id": r["id"], "prompt": r["prompt"], "created_at": r["created_at"]} for r in rows]
+    return [
+        {"id": r["id"], "source": r["source"], "file_name": r["file_name"],
+         "prompt": r["prompt"], "created_at": r["created_at"]}
+        for r in rows
+    ]
 
 
 def _upsert_wiki(conn: sqlite3.Connection, user_id: int, style: str,
@@ -974,23 +1040,13 @@ def _mark_images_wiki_used(conn: sqlite3.Connection, user_id: int,
     return cur.rowcount
 
 
-def _mark_uploaded_wiki_used(conn: sqlite3.Connection, user_id: int) -> int:
-    """上传作品一并"视为已考虑"（Spec12 §2）：否则传过图的用户永远剩着未考虑的图。"""
-    cur = conn.execute(
-        "UPDATE images SET wiki_used = 1 "
-        "WHERE user_id = ? AND source = 'upload' AND wiki_used = 0",
-        (user_id,),
-    )
-    return cur.rowcount
-
-
 def commit_style_update(user_id: int, style: str,
                         used_image_ids: list[int] | None = None) -> dict:
     """写风格：单事务内 upsert wiki（旧 style → prev_style）+ 标记作品（Spec12 §5.3）。
 
     - `used_image_ids=None`：手动编辑路径，只写 wiki，**不触碰** images.wiki_used。
-    - `used_image_ids=[...]`：按钮更新路径，标记这些作品为已用，并顺带把该用户其余
-      source='upload' 且未标记的作品一并标记为已考虑。
+    - `used_image_ids=[...]`：按钮更新路径，**只**标记这些真正被纳入的作品（含分析成功的
+      上传图，Spec15 §5.2B 第 F 步）——没有"顺带标记"这种假账了。
 
     上游调用失败时不会走到这里，故不存在"作品被标记但风格没更新"的中间态。
     返回写入后的 wiki 记录（含新的 prev_style / style_updated_at）。
@@ -1002,6 +1058,5 @@ def commit_style_update(user_id: int, style: str,
         _upsert_wiki(conn, user_id, style, prev_style, now)
         if used_image_ids is not None:
             _mark_images_wiki_used(conn, user_id, used_image_ids)
-            _mark_uploaded_wiki_used(conn, user_id)
         conn.commit()
     return get_wiki(user_id)

@@ -3,6 +3,7 @@
 统一约定：站内图片以 /images/{file} 表示；对外返回绝对 URL。
 """
 import asyncio
+import base64
 import io
 import re
 import time
@@ -18,6 +19,14 @@ from errors import (FileMissingError, ImageProcessError, ImageTooLargeError,
                     UnsupportedImageTypeError)
 
 _FILENAME_SAFE = re.compile(r"^[a-zA-Z0-9_\-]+\.(jpg|jpeg|png|webp|gif)$")
+
+_MIME_BY_EXT = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 # ---------- 保存 ----------
@@ -136,6 +145,18 @@ def downscale_to_max_side(image_bytes: bytes, max_side: int = config.SKETCH_MAX_
         raise
     except Exception as exc:  # noqa: BLE001
         raise ImageProcessError(f"图片缩放失败: {exc}") from exc
+
+
+def to_data_uri(image_bytes: bytes, max_side: int = 0) -> str:
+    """把图片字节转成 data URI（Spec15 §2）。
+
+    max_side > 0 时先缩放到最长边 ≤ max_side（送视觉模型前省流量）。
+    mime **以最终送出的那些字节为准重新识别**：downscale_to_max_side 会把超限的 GIF
+    转存成 PNG，若沿用 images.ext（.gif）拼 mime 就会把 PNG 字节标成 image/gif。
+    """
+    data = downscale_to_max_side(image_bytes, max_side) if max_side > 0 else image_bytes
+    mime = _MIME_BY_EXT.get(detect_ext(data), "image/jpeg")
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
 def enforce_sketch_input(image_bytes: bytes) -> bytes:

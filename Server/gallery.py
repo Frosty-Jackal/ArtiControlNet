@@ -3,6 +3,8 @@
 文件与元数据分离：库管"谁的、哪来的、什么时候"，目录管字节。
 与临时 storage/（TTL 1h、启动清空）完全分开：重启不清、不受 TTL 影响。
 所有读取/删除先校验 images.user_id == 当前用户，否则 40403（不泄露存在性）。
+
+Spec16 起：上传作品可带一条**备注**（images.note），与生成作品的 prompt 对位显示。
 """
 import logging
 import re
@@ -11,7 +13,7 @@ import uuid
 import config
 import db
 import media
-from errors import GalleryItemNotFoundError
+from errors import GalleryItemNotFoundError, GalleryNoteError
 
 logger = logging.getLogger("gallery")
 
@@ -27,20 +29,66 @@ _MIME = {
 
 
 def save_gallery_image(image_bytes: bytes, user_id: int, source: str,
-                       prompt: str | None) -> dict:
+                       prompt: str | None, note: str | None = None) -> dict:
     """把图片字节写入 gallery/ 并落 images 表，返回记录 dict。
 
     source ∈ upload|generate|edit；prompt 仅生成/编辑存完整描述（含合并风格），上传为 None。
+    note（Spec16）只有作品库直传会传——聊天参考图 / 发帖新上传 / 生成 / 绘图四条既有
+    路径都不带它，默认 None 使它们一行都不用改。
     """
     ext = media.detect_ext(image_bytes)
     file_name = f"{uuid.uuid4().hex}{ext}"
     (config.GALLERY_DIR / file_name).write_bytes(image_bytes)
-    record = db.add_image_record(user_id, source, file_name, ext, prompt)
+    record = db.add_image_record(user_id, source, file_name, ext, prompt, note)
     logger.info("作品入库", extra={
         "event": "gallery.saved", "user_id": user_id, "source": source,
         "prompt": (prompt or "")[:200],
+        # 备注全文不入日志（用户私人文字，Spec16 §10）；只记"写没写上"
+        "has_note": bool(note),
     })
     return record
+
+
+def create_upload(image_bytes: bytes, user_id: int, note: str | None,
+                  public_base: str = "") -> dict:
+    """作品库直传（Spec16 §5.2B）：校验备注 → 入库 → 返回与列表项同形的作品项。
+
+    调用方（路由层）已做过 content_type 白名单与 media.validate_upload。
+    """
+    text = _clean_note(note)
+    record = save_gallery_image(image_bytes, user_id, "upload", None, text)
+    return _with_url(record, public_base)
+
+
+def update_note(item_id: int, user_id: int, note: str | None,
+                public_base: str = "") -> dict:
+    """改 / 清空某上传作品的备注（Spec16 §5.2C），返回更新后的作品项。
+
+    - 不存在 / 非本人 → 40403；非上传作品 → 40015（生成作品的说明位是模型给的 prompt）。
+    - 不触碰 images.wiki_used，也不碰 wiki / shares —— 改备注是纯元数据动作。
+    """
+    record = _get_owned(item_id, user_id)
+    if record["source"] != "upload":
+        raise GalleryNoteError("只有上传的作品可以写备注")
+    text = _clean_note(note)
+    db.set_image_note(item_id, text)
+    logger.info("作品备注已更新", extra={
+        "event": "gallery.note_updated", "user_id": user_id, "item_id": item_id,
+        "has_note": bool(text),
+    })
+    return _with_url(db.get_image_record(item_id), public_base)
+
+
+def _clean_note(note: str | None) -> str | None:
+    """备注归一化（Spec16 §5.2B/C）：strip → 空则 None（= 无备注）；超长 → 40015。
+
+    长度按 strip 后的字符数算（中文按 1 字），与 config.GALLERY_NOTE_MAX 同口径。
+    放在业务层而非 pydantic，保证 40015 能带中文提示返回，而不是 FastAPI 的 422。
+    """
+    text = (note or "").strip()
+    if len(text) > config.GALLERY_NOTE_MAX:
+        raise GalleryNoteError(f"备注需在 {config.GALLERY_NOTE_MAX} 字以内")
+    return text or None
 
 
 def list_user_images(user_id: int, source: str | None = None,
@@ -63,6 +111,7 @@ def _with_url(record: dict, public_base: str = "") -> dict:
         "source": record["source"],
         "url": f"/api/gallery/{record['id']}/file",
         "prompt": record["prompt"],
+        "note": record["note"],          # Spec16：上传作品的备注（可空）
         "created_at": record["created_at"],
         "share": share_out,
     }
