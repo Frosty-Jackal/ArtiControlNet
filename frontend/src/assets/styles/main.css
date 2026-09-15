@@ -1144,7 +1144,14 @@ option {
 /* ================= Spec17：帖子评论区（内联滚动区）================= */
 
 .post-comments {
-  max-height: 200px;
+  /* Spec17 §14.1：min-height 保底，避免被图片与输入框挤成 0 高。
+     它是滚动容器，flex 项的 min-height:auto 会解析成 0，于是默认的
+     flex-shrink:1 会让它**先于**其他元素被压没（带图帖评论区消失的根因）；
+     显式给下限后，任何窗口高度下都留出可滚动区。上限定在 260px，
+     「固定高内滚动、不撑高弹窗」的约定不变（§7.7 / 验收 #53）。 */
+  flex: 1 1 auto;
+  min-height: 110px;
+  max-height: 260px;
   overflow-y: auto;
   padding: 4px 0;
   border-top: 1px solid var(--border-color);
@@ -1195,6 +1202,7 @@ option {
   align-items: center;
   gap: 8px;
   padding-top: 2px;
+  flex-shrink: 0;      /* 输入框优先于评论区（Spec17 §14.1） */
 }
 
 .comment-count {

@@ -606,9 +606,9 @@ onBeforeUnmount(() => {
 
 /* 帖子弹窗 */
 .community-modal {
-  max-width: 720px;
+  max-width: 760px;
   width: 100%;
-  max-height: 90%;
+  max-height: 92%;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
@@ -621,9 +621,11 @@ onBeforeUnmount(() => {
 .community-modal-img {
   display: block;
   width: 100%;
-  max-height: 60vh;
+  /* Spec17 §14.1：60vh 会把带图帖的评论区挤成 0 高，收到 45vh 给固定内容留余量 */
+  max-height: 45vh;
   object-fit: contain;
   background: var(--bg-input);
+  flex-shrink: 0;
 }
 
 .community-modal-body {
@@ -631,6 +633,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* flex:1 + min-height:0：拿到图片之外的全部剩余高度，且允许自身收缩到该高度
+     （滚动容器的 min-height:auto 本来是 0，显式写出以免被误读成"内容高"）。
+     内部的 .post-comments 才有确定的高度可分配（Spec17 §14.1）。 */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -638,6 +645,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .community-modal-text {
@@ -647,6 +655,10 @@ onBeforeUnmount(() => {
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-all;
+  /* 帖子文字上限 1000 字（约 30 行），长帖不能独占弹窗把评论区顶出去 */
+  max-height: 22vh;
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .community-modal-actions {
@@ -654,6 +666,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding-top: 4px;
+  flex-shrink: 0;
 }
 
 /* 发帖弹窗 */

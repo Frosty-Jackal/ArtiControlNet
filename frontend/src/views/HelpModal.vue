@@ -4,7 +4,7 @@
       <button class="help-close" title="关闭" @click="close">×</button>
 
       <h2 class="help-title">认识 ArtiControlNet</h2>
-      <p class="help-lead">赋能设计的 AIGC 系统——你说想法，它出图。三种玩法，照着说就行。</p>
+      <p class="help-lead">赋能设计的 AIGC 系统——你说想法，它出图。</p>
 
       <div class="help-item">
         <p class="help-item-title">🎨 文生图</p>
@@ -36,7 +36,7 @@
       <p class="help-explore">✨ 以上三种只是基础玩法，更多神奇进阶功能，等你自己探索。</p>
 
       <div class="help-foot">
-        <p class="help-tip">支持 jpg / png / webp / gif，≤10MB。每条消息都能带一张图。</p>
+        <p class="help-tip">支持 jpg / png / webp / gif，≤10MB。每条消息都能带图。</p>
         <button class="btn-primary help-start" @click="close">开始使用</button>
       </div>
     </div>

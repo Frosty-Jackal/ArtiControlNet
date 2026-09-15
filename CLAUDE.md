@@ -55,6 +55,7 @@ hosted 对话侧边栏                  /api/tasks/{id} /api/conversations/...  
 - **`Server/artcn.db` is persistent**: 后端重启不清库，已在 .gitignore。初始管理员由 `.env` 的 `ADMIN_USERNAME/ADMIN_PASSWORD` 在首次启动时创建（表空时）。除 `POST /api/auth/login` 外所有 `/api` 接口都要带 `Authorization: Bearer <JWT>`，无 token → 40103；普通用户访问 `/api/admin/*` → 40301。
 - **聊天图片按 `images.id` 引用作品库**（Spec17 §5.2A）：`chat_messages.image_id` 指向 `images` 表，渲染走 `GET /api/gallery/{id}/file`，**不复制字节**。因此用户在「我的作品」里删图后，历史消息里的引用会悬挂——前端渲染「图片已删除」占位（`useAuthedImage` 的 `missing`），后端不做补偿；删对话**不删**作品库图片。
 - **评论只增 / 删 / 查，没有编辑**（Spec17 §2.3）：`post_comments` 表没有 `updated_at` 列，这是全仓唯一没有 `PUT` 的资源，有意为之——别顺手补一个编辑接口。
+- **帖子弹窗的 flex 塌陷陷阱**（Spec17 §14.1）：`.post-comments` 是 `.community-modal-body`（flex 列）的子项且**自身是滚动容器**，`min-height: auto` 会解析成 0，于是它**先于**别的元素被压到 0 高——曾经导致带图帖的评论区整个消失（`comment-form` 不是滚动容器，压不动，所以只有评论区让位）。保命的是那行 `min-height: 110px`，别删；改动弹窗高度分配时（图片 `max-height: 45vh`、固定内容 `flex-shrink: 0`）要一并考虑。
 - **`posts.image_file` / `ext` 可空**（Spec17 §5.2D）：纯文字帖是合法形态，读图路径（`community.read_post_image`）在无图时返回 40404；`community.list_posts` 会把内部字段 `image_file` 从响应里 `pop` 掉，只给 `image_url`。
 - There are **no automated tests and no linter** in any tier.
 
