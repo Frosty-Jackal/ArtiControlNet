@@ -35,6 +35,15 @@
 
       <p class="help-explore">✨ 以上三种只是基础玩法，更多神奇进阶功能，等你自己探索。</p>
 
+      <!-- Spec18 §7.7：服务次数说明 -->
+      <div class="help-item">
+        <p class="help-item-title">📊 服务次数</p>
+        <p class="help-item-desc">
+          每个账号有一定的服务调用额度（默认 25 次，含对话、文生图、图文生图、图像
+          QA、风格归纳）。次数用满后需要联系管理员续费才能继续使用。管理员不受额度限制。
+        </p>
+      </div>
+
       <div class="help-foot">
         <p class="help-tip">支持 jpg / png / webp / gif，≤10MB。每条消息都能带图。</p>
         <button class="btn-primary help-start" @click="close">开始使用</button>

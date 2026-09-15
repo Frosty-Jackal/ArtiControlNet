@@ -33,7 +33,8 @@ from errors import (AppError, AuthTokenError, BadRequestError,
                     FeedbackParamError, FileMissingError, ForbiddenError,
                     GalleryItemNotFoundError, LoginFailedError,
                     LoginRateLimitedError, NotFoundError, PostContentError,
-                    PostNotFoundError, ShareNotFoundError, SuggestionContentError,
+                    PostNotFoundError, QuotaExceededError, QuotaLimitError,
+                    ShareNotFoundError, SuggestionContentError,
                     SuggestionNotFoundError, UnsupportedImageTypeError,
                     UserNotFoundError)
 from logging_setup import configure_logging
@@ -325,6 +326,21 @@ def _auth_reject(request: Request, code: int, message: str,
                         content={"code": code, "message": message, "data": None})
 
 
+def _quota_reject(request: Request, user: dict) -> JSONResponse:
+    """服务次数耗尽：与 _auth_reject 分开，用独立 event 名（排障时一眼可辨，Spec18 §6.4）。"""
+    logger.warning("服务次数已达上限，拒绝访问", extra={
+        "event": "auth.quota_blocked",
+        "request_id": request.headers.get("x-request-id"),
+        "username": user["username"], "used": user["used"],
+        "quota_limit": user["quota_limit"],
+        "path": request.url.path,
+    })
+    return JSONResponse(
+        status_code=403,
+        content={"code": 40304, "message": config.QUOTA_EXCEEDED_MESSAGE, "data": None},
+    )
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # CORS 预检放行（由 CORSMiddleware 处理 OPTIONS）
@@ -348,6 +364,13 @@ async def auth_middleware(request: Request, call_next):
             "username": user["username"],
             "is_admin": user["is_admin"],
         }
+        # Spec18 §6.4：普通用户服务次数用满即全拦（含 /api/auth/me），
+        # 前端据 40304 清 token 回登录页并弹出提示。
+        # 位置：放在 request.state.user 之后（日志/上下文需要它），
+        #       放在 /api/admin/* 判断之前（管理员恒豁免，顺序上先排掉更省分支）。
+        # 这一次判定不额外查库：used 已由 db.get_user_by_id 的 LEFT JOIN 带出（§2.3）。
+        if not user["is_admin"] and user["used"] >= user["quota_limit"]:
+            return _quota_reject(request, user)
         if path.startswith("/api/admin/"):
             if not user["is_admin"]:
                 return _auth_reject(request, 40301, "无权限：仅管理员可访问", 403)
@@ -1019,6 +1042,17 @@ async def login(payload: schemas.LoginRequest, request: Request,
         })
         raise LoginFailedError()
 
+    # Spec18 §6.3：限额判定放在密码校验之后（否则任何人都能拿用户名探测账号状态），
+    # 放在 reset_login_failures 之前（被拒绝的请求不产生任何"部分成功"的副作用）。
+    # 管理员永远走不到这个分支。
+    if not user["is_admin"] and user["used"] >= user["quota_limit"]:
+        logger.warning("服务次数已达上限，拒绝登录", extra={
+            "event": "auth.quota_blocked", "request_id": request_id,
+            "username": user["username"], "used": user["used"],
+            "quota_limit": user["quota_limit"],
+        })
+        raise QuotaExceededError()
+
     auth.reset_login_failures(ip)
     token = auth.create_token(user["id"], user["username"])
     logger.info("登录成功", extra={
@@ -1054,7 +1088,39 @@ async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Re
 
 @app.get("/api/admin/users")
 async def admin_list_users(request: Request):
+    """用户列表（Spec18 §6.1）：每项带 quota_limit / used，**不含** password_hash。
+
+    不返回"是否超额"这个派生布尔——前端用 `!u.is_admin && u.used >= u.quota_limit`
+    现算，超额的判据只有一处，复制到接口层就多了一个会漂移的副本。
+    """
     return _ok(db.list_users())
+
+
+@app.put("/api/admin/users/{user_id}/quota")
+async def admin_set_quota(user_id: int, payload: schemas.AdminSetQuotaRequest,
+                          request: Request,
+                          x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """设置某用户的累计服务限额（Spec18 §6.2）。**仅管理员**（/api/admin/* 前缀，中间件保证）。
+
+    0 是合法取值：等于禁止该用户使用任何服务（新建即锁）；负数非法。
+    允许对管理员设置（返回值照常），只是判定时被 is_admin 豁免——这样"设为/撤销
+    管理员"与"改限额"两个动作正交。
+    """
+    request_id = _request_id(x_request_id)
+    operator = request.state.user
+    if payload.quota_limit < 0 or payload.quota_limit > config.QUOTA_LIMIT_MAX:
+        raise QuotaLimitError()
+    target = db.set_user_quota(user_id, payload.quota_limit)
+    if target is None:
+        raise UserNotFoundError("用户不存在")
+    logger.info("设置服务限额", extra={
+        "event": "auth.admin.set_quota", "request_id": request_id,
+        "username": operator["username"], "target_user": target["username"],
+        "quota_limit": payload.quota_limit,
+    })
+    # 回带 used：前端不必再拉一次整表就能就地更新那一行
+    return _ok({"id": target["id"], "quota_limit": target["quota_limit"],
+                "used": target["used"]})
 
 
 @app.put("/api/admin/users/{user_id}/password")

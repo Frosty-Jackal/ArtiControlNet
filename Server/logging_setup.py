@@ -22,7 +22,9 @@ class JsonFormatter(logging.Formatter):
                # Spec12 个人作品风格 Wiki 事件字段
                "user_id", "source", "used_count", "style_len", "reason",
                # Spec15 上传作品纳入风格事件字段
-               "upload_analyzed", "upload_failed", "affected")
+               "upload_analyzed", "upload_failed", "affected",
+               # Spec18 服务限额事件字段（auth.quota_blocked / auth.admin.set_quota）
+               "used", "quota_limit", "path")
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(

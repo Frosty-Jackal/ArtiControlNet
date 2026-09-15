@@ -112,12 +112,14 @@ function fmtCleared(iso) {
 const usageClearedText = computed(() => fmtCleared(stats.value.usage_cleared_at))
 const feedbackClearedText = computed(() => fmtCleared(stats.value.feedback_cleared_at))
 
-// 4 类展示顺序（Spec4 §7）
+// 5 类展示顺序（Spec4 §7；Spec18 §7.6a 追加风格归纳）
 const CATEGORIES = [
   { key: 'chat', label: '对话' },
   { key: 'generate', label: '文生图' },
   { key: 'edit', label: '图文生图' },
-  { key: 'qa', label: '图像QA' }
+  { key: 'qa', label: '图像QA' },
+  // Spec18：按实际发出的图片数计（每张上传图 1 次 + 风格合成 1 次），粒度与前四类不同
+  { key: 'style', label: '风格归纳' }
 ]
 
 const rows = computed(() =>
@@ -154,8 +156,14 @@ async function clearFeedbackStats() {
 }
 
 // Spec11：清空调用统计（confirm 一次防误触，成功后刷新；清零不可恢复）
+// Spec18 §7.6b：文案必须同时说清"清什么"和"不清什么"，否则管理员会以为它顺带解封。
+// window.confirm 是纯文本，不渲染 Markdown，故用【】而不是 **。
 async function clearUsageStats() {
-  if (!window.confirm('确定清空全部调用统计？对话 / 文生图 / 图文生图 / 图像QA 的计数将归 0，此操作不可撤销。')) return
+  if (!window.confirm(
+    '确定清空全部调用统计？对话 / 文生图 / 图文生图 / 图像QA / 风格归纳 的计数将归 0。\n' +
+    '注意：这只重置统计区间，【不影响】各用户在「用户管理」页的服务限额与已用次数。\n' +
+    '此操作不可撤销。'
+  )) return
   clearingUsage.value = true
   error.value = ''
   try {

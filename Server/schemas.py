@@ -91,6 +91,16 @@ class AdminSetAdminRequest(BaseModel):
     is_admin: bool
 
 
+class AdminSetQuotaRequest(BaseModel):
+    """PUT /api/admin/users/{user_id}/quota 请求体（Spec18 §6.2）。
+
+    非整数由 FastAPI/Pydantic 的 `int` 校验拦下 → 40001；
+    取值范围（0 ~ QUOTA_LIMIT_MAX）在路由层判 → 40017。
+    """
+
+    quota_limit: int
+
+
 # ---- 社区 / 反馈 / 分享 / 建议（Spec9 §6）----
 
 class VoteRequest(BaseModel):

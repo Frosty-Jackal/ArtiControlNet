@@ -185,6 +185,15 @@ window.addEventListener('artcn:unauthorized', () => {
   closeAllPanels()
 })
 
+// Spec18 §7.1b：服务次数耗尽 → 与 401 同样地登出并关掉所有面板。
+// 处理体与上面那条完全相同，但**不复用同一个事件名**：两者的原因不同
+// （登录态坏了 vs 额度用完了），日志和将来可能的分叉处理都需要能分开。
+// 提示语已由拦截器写进 utils/quotaNotice，由登出后挂载的 Login.vue 弹出。
+window.addEventListener('artcn:quota_exceeded', () => {
+  auth.logout()
+  closeAllPanels()
+})
+
 function onLogout() {
   auth.logout()
   closeAllPanels()

@@ -11,6 +11,10 @@
 本模块只记 `wiki.upload_analysis_failed`（逐张失败需要 image_id，只有这里知道）；
 `wiki.style_updated` / `wiki.refresh_skipped` 由 main.py 在路由层记（需要 request_id，
 且不该把风格全文写进日志）。
+
+Spec18：本模块是 `style` 类别计数的**唯一埋点处**——两次 `db.record_call(user_id, "style")`
+分别在视觉调用与文本合成**发出之前**（§5.2B）。粒度与四类任务不同（按实际发出的上游
+调用数，不是按任务），别顺手改成"成功后才记"。
 """
 import asyncio
 import logging
@@ -76,6 +80,9 @@ async def refresh_style(user_id: int) -> dict:
         return _skip(user_id, "analysis_failed", len(pending), upload_failed=len(failed))
 
     history = db.get_wiki(user_id)["style"]
+    # Spec18 §5.2B：风格合成也是一次真实调用；nothing_new / analysis_failed 两条
+    # 跳过路径都到不了这里，所以它们天然是 0。
+    db.record_call(user_id, "style")
     raw = await deepseek.chat_text(_build_messages(history, analyses, refs))
     style = _clean(raw)[:config.WIKI_STYLE_MAX]
     if not style:
@@ -125,6 +132,9 @@ async def _analyze_uploads(user_id: int, uploads: list[dict]) -> tuple[list[dict
             # 归属校验在 gallery 内兜底：即使 list_pending_style_images 出错也读不到别人的图
             _, image_bytes = gallery.read_gallery_file(item["id"], user_id)
             data_uri = media.to_data_uri(image_bytes, max_side=config.WIKI_UPLOAD_QA_MAX_SIDE)
+            # Spec18 §5.2B：调用即将发出即记账（不是"成功后记"）。放在 read_gallery_file /
+            # to_data_uri 之后，保证"图已被删"这类**根本没发出调用**的情况不被计费。
+            db.record_call(user_id, "style")
             text = (await qa(data_uri, WIKI_UPLOAD_QA_PROMPT)).strip()
         if not text:
             raise UpstreamApiError("deepseek", "上传图风格分析返回为空")

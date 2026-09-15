@@ -17,17 +17,24 @@ logger = logging.getLogger("db")
 
 AUTH_DB_PATH = config.AUTH_DB_PATH
 
-_CREATE_TABLE = """
+# 新建用户的默认服务限额（Spec18 §5.1b）。只在 DDL 里用；int() 过一遍，无注入面。
+# 存量库由 _migrate_users_quota_limit 补列、取同一个 _QUOTA_DEFAULT，
+# 因此「默认限额」在全仓只有一个来源（config.QUOTA_DEFAULT_LIMIT）。
+_QUOTA_DEFAULT = int(config.QUOTA_DEFAULT_LIMIT)
+
+_CREATE_TABLE = f"""
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     is_admin      INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    quota_limit   INTEGER NOT NULL DEFAULT {_QUOTA_DEFAULT}
 )
 """
 
-# 4 类调用计数表（Spec4 §5.4）：每用户一行，任务成功完成后 +1。
+# 5 类调用计数表（Spec4 §5.4，Spec18 §5.1c 补 style 列）：每用户一行，任务成功完成后 +1。
+# style（Spec18）粒度不同：按**实际发出的上游调用**计，见 record_call 的说明。
 _CREATE_USAGE_TABLE = """
 CREATE TABLE IF NOT EXISTS usage (
     user_id    INTEGER PRIMARY KEY,
@@ -35,12 +42,26 @@ CREATE TABLE IF NOT EXISTS usage (
     generate   INTEGER NOT NULL DEFAULT 0,
     edit       INTEGER NOT NULL DEFAULT 0,
     qa         INTEGER NOT NULL DEFAULT 0,
+    style      INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 )
 """
 
+# 计费账户（Spec18 §5.1a）：每用户一行，单调累计，**永不清零**。
+# 与 usage 表的分工见 Spec18 §2.2：usage 是"区间统计"（可被 Spec11 的清空按钮删行），
+# user_quota 是"终身账本"（只增不减）。两处由 record_call 在同一事务里写入，永远同步。
+# 管理员同样有行（照常累计与展示），只是不参与限额判定。
+# 本表**不放进 init_db 的建表清单**，由 _backfill_user_quota 负责——那正是它的幂等判据（§5.1e）。
+_CREATE_USER_QUOTA_TABLE = """
+CREATE TABLE IF NOT EXISTS user_quota (
+    user_id    INTEGER PRIMARY KEY,
+    used       INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT    NOT NULL
+)
+"""
+
 # 计数列白名单（record_call 据此拼列名，绝不拼接外部输入）
-_USAGE_CATEGORIES = ("chat", "generate", "edit", "qa")
+_USAGE_CATEGORIES = ("chat", "generate", "edit", "qa", "style")
 
 # 个人作品库表（Spec5 §5.3）：文件与元数据分离，文件字节在 Server/gallery/。
 # wiki_used（Spec12 §5.1b）：该作品是否已被纳入过个人风格更新（1 = 已考虑）。
@@ -224,6 +245,10 @@ WIKI_UPLOAD_MIGRATED_KEY = "wiki_upload_migrated"
 # 历史 👍/👎 与新任务撞号，覆盖他人 feedback 行。持久化后 task_id 全局单调、永不重用。
 TASK_ID_SEQ_KEY = "task_id_seq"
 
+# app_meta 键：user_quota 存量回填的执行时间（UTC ISO，Spec18 §5.1e）。
+# 信息性——真正的幂等判据是 sqlite_master 里表存在与否（§5.1e），这个键只供排障。
+QUOTA_BACKFILLED_KEY = "quota_backfilled_at"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -235,16 +260,39 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
+# 用户查询统一带上配额状态（Spec18 §5.1f）——所有读 users 的地方都走它。
+# LEFT JOIN 而非 JOIN：用户可能还没有 user_quota 行（理论上不该有，但缺失时
+# 必须退化成"已用 0 次"而不是"查不到这个人"）。
+_USER_SELECT = (
+    "SELECT u.*, COALESCE(q.used, 0) AS used "
+    "FROM users u LEFT JOIN user_quota q ON q.user_id = u.id"
+)
+
+
+def _row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict | None:
+    """users 行 → dict（行须来自 _USER_SELECT）。
+
+    Spec18 §5.1f：**默认不再带出 `password_hash`**。它是 bcrypt 哈希、不是明文，
+    但 `GET /api/admin/users` 一直在把它返回给前端，而前端从来没用过——一个只在
+    登录时需要的秘密，没有任何理由出现在列表接口里。改成"要用必须显式要"，
+    这个保证就从"调用方自觉"变成了结构性的。
+
+    新增：`quota_limit`（users 列）、`used`（user_quota 累计，见 _USER_SELECT）。
+    `with_secret=True` 全仓只有 `get_user_by_username` 一处（登录校验密码）。
+    """
     if row is None:
         return None
-    return {
+    record = {
         "id": row["id"],
         "username": row["username"],
-        "password_hash": row["password_hash"],
         "is_admin": bool(row["is_admin"]),
         "created_at": row["created_at"],
+        "quota_limit": int(row["quota_limit"]),
+        "used": int(row["used"]),
     }
+    if with_secret:
+        record["password_hash"] = row["password_hash"]
+    return record
 
 
 def _image_row_to_dict(row: sqlite3.Row | None) -> dict | None:
@@ -411,6 +459,65 @@ def _migrate_images_note(conn: sqlite3.Connection) -> None:
         logger.info("images.note 列已补齐", extra={"event": "db.migrate"})
 
 
+def _migrate_users_quota_limit(conn: sqlite3.Connection) -> None:
+    """存量库补 users.quota_limit（Spec18 §5.1b）：PRAGMA 查得无该列才 ALTER，幂等。
+
+    默认值取模块级的 _QUOTA_DEFAULT（= config.QUOTA_DEFAULT_LIMIT，§5.1b），
+    与新库的 _CREATE_TABLE 同源。**它只在建表/补列时生效，改它不影响已存在的用户**
+    （见 §3.3-5）。
+    列顺序：存量库追加在末尾，新库在 _CREATE_TABLE 里；读取一律按列名，行为无差别。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "quota_limit" not in cols:
+        conn.execute(
+            f"ALTER TABLE users ADD COLUMN quota_limit INTEGER NOT NULL "
+            f"DEFAULT {_QUOTA_DEFAULT}"
+        )
+        logger.info("users.quota_limit 列已补齐", extra={"event": "db.migrate"})
+
+
+def _migrate_usage_style(conn: sqlite3.Connection) -> None:
+    """存量库补 usage.style（Spec18 §5.1c）：PRAGMA 查得无该列才 ALTER，幂等。
+
+    存量行一律为 0：Spec15 之前的风格归纳调用**没有记过**，无法追溯（§3.2）。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(usage)").fetchall()}
+    if "style" not in cols:
+        conn.execute("ALTER TABLE usage ADD COLUMN style INTEGER NOT NULL DEFAULT 0")
+        logger.info("usage.style 列已补齐", extra={"event": "db.migrate"})
+
+
+def _backfill_user_quota(conn: sqlite3.Connection) -> None:
+    """首次引入 user_quota 表时，把既有 usage 的前四类求和回填为已用次数（Spec18 §5.1e）。
+
+    判据：sqlite_master 里查不到 user_quota 表 → 说明这是升级后的第一次启动，
+    此刻建表并回填。之后每次启动该表都存在，直接返回（绝不覆盖运行期数据）。
+
+    **只回填 chat/generate/edit/qa**：style 是本次新加的列，存量行恒为 0，
+    回填它没有意义（Spec15~17 期间的视觉调用没记过，§3.2）。
+
+    回填的直接后果：旧库里已用满默认限额的普通用户，升级后立刻被锁（§3.3-4）。
+    这是本函数存在的理由——不回填等于上线即给所有人清零，与"计费"语义矛盾。
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_quota'"
+    ).fetchone()
+    if exists:
+        return
+    conn.execute(_CREATE_USER_QUOTA_TABLE)
+    conn.execute(
+        "INSERT INTO user_quota (user_id, used, updated_at) "
+        "SELECT user_id, "
+        "       COALESCE(chat, 0) + COALESCE(generate, 0) "
+        "     + COALESCE(edit, 0) + COALESCE(qa, 0), "
+        "       ? "
+        "FROM usage WHERE user_id IS NOT NULL",
+        (_now_iso(),),
+    )
+    _upsert_meta(conn, QUOTA_BACKFILLED_KEY, _now_iso())
+    logger.info("user_quota 已建表并回填存量用量", extra={"event": "db.migrate"})
+
+
 def _migrate_posts_nullable_image(conn: sqlite3.Connection) -> None:
     """存量库把 posts.image_file / ext 改为可空（Spec17 §5.1c：纯文字帖）。
 
@@ -479,6 +586,15 @@ def init_db() -> None:
         _migrate_upload_wiki_used(conn)
         # Spec16 §5.1b：存量库补 images.note 列
         _migrate_images_note(conn)
+        # Spec18 §5.1d：两次补列迁移，必须在 _backfill_user_quota **之前**
+        _migrate_users_quota_limit(conn)
+        _migrate_usage_style(conn)
+        # Spec18 §5.1e：建 user_quota 表 + 回填存量用量。
+        # 位置约束一：必须在 _migrate_usage_style 之后（否则求和语句里没有 style 列）。
+        # 位置约束二：必须在 _CREATE_META_TABLE 之后（回填会写 app_meta 键）。
+        # 它**不在**上面的建表清单里——`CREATE TABLE IF NOT EXISTS` 会让
+        # `sqlite_master` 判据在第一次启动时提前成立，回填被静默跳过。
+        _backfill_user_quota(conn)
         # Spec17 §5.1c：存量库把 posts.image_file / ext 改为可空（纯文字帖）
         _migrate_posts_nullable_image(conn)
         conn.commit()
@@ -508,14 +624,17 @@ def create_initial_admin() -> None:
 
 def get_user_by_id(user_id: int) -> dict | None:
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute(f"{_USER_SELECT} WHERE u.id = ?", (user_id,)).fetchone()
     return _row_to_dict(row)
 
 
 def get_user_by_username(username: str) -> dict | None:
+    """按用户名取用户（**唯一**带出 password_hash 的地方，登录校验密码用）。"""
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    return _row_to_dict(row)
+        row = conn.execute(
+            f"{_USER_SELECT} WHERE u.username = ?", (username,)
+        ).fetchone()
+    return _row_to_dict(row, with_secret=True)
 
 
 def count_users() -> int:
@@ -550,7 +669,7 @@ def create_user(username: str, password_hash: str, is_admin: bool = False) -> di
 def list_users() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM users ORDER BY id ASC"
+            f"{_USER_SELECT} ORDER BY u.id ASC"
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
 
@@ -575,9 +694,29 @@ def set_admin(user_id: int, is_admin: bool) -> bool:
     return cur.rowcount > 0
 
 
+def set_user_quota(user_id: int, quota_limit: int) -> dict | None:
+    """设置某用户的服务限额（Spec18 §6.2），返回更新后的用户记录或 None。
+
+    只动 users.quota_limit 一列——**已用次数（user_quota.used）是历史事实，不碰**。
+    管理员的"续费"动作就是把限额改大（§2.4）。对管理员设置同样允许（判定时被
+    is_admin 豁免），这样"设为/撤销管理员"与限额两个动作正交（§6.2）。
+
+    取值合法性（0 ~ QUOTA_LIMIT_MAX）由路由层校验，本函数不做判断。
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET quota_limit = ? WHERE id = ?", (quota_limit, user_id)
+        )
+        conn.commit()
+    if cur.rowcount == 0:
+        return None
+    return get_user_by_id(user_id)
+
+
 def delete_user(user_id: int) -> bool:
-    """删除用户；连带删除其 usage / images / 社区 / 反馈 / 分享 / 建议 / wiki /
-    对话 / 评论记录，保证口径一致（Spec4 §3 / Spec5 §3 / Spec9 §3 / Spec12 §5.3 / Spec17 §5.1f）。
+    """删除用户；连带删除其 usage / user_quota / images / 社区 / 反馈 / 分享 / 建议 / wiki /
+    对话 / 评论记录，保证口径一致（Spec4 §3 / Spec5 §3 / Spec9 §3 / Spec12 §5.3 / Spec17 §5.1f /
+    Spec18 §5.1h）。
 
     注意：仅删除数据库记录。gallery/ 物理文件由 gallery.delete_user_gallery 负责、
     community/ 物理文件由 community.delete_user_posts 负责（都先取文件名再删文件，
@@ -588,6 +727,8 @@ def delete_user(user_id: int) -> bool:
     **之前**，否则子查询已经取不到帖子 id。
     """
     with _connect() as conn:
+        # Spec18 §5.1h：只删账本行，不删 usage 的既有语句（两者都留，各自级联）
+        conn.execute("DELETE FROM user_quota WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM usage WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM images WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM post_votes WHERE user_id = ?", (user_id,))
@@ -613,10 +754,18 @@ def delete_user(user_id: int) -> bool:
 # ---------- 使用统计（Spec4） ----------
 
 def record_call(user_id: int, category: str) -> None:
-    """任务成功完成后累计一次调用（UPSERT，首次调用即计 1）。
+    """累计一次调用：usage（区间统计）+ user_quota（计费账户）**同一事务**写入。
 
     新行各列插 0、目标列插 1；已存在行用 excluded 增量累加，避免首次调用被吞。
     category 取自固定白名单；列名均为静态字面量，不拼接外部输入。
+
+    Spec18 §2.2：两个表的和必须永远同步，否则会出现"统计涨了但没扣费"的窗口。
+    因此这里刻意开一次连接、写两条语句、一次 commit —— 不要拆成两个函数、
+    也不要在调用方串两次。
+
+    调用时机由调用方决定，本函数不做任何"该不该计"的判断：
+    - 四类任务（chat/generate/edit/qa）：任务**成功完成后**计一次（Spec4 既有口径，不变）；
+    - style：**上游调用发出前**计一次（Spec18 §5.2B，理由见 §2.1"为什么不能沿用成功才计"）。
     """
     if category not in _USAGE_CATEGORIES:
         raise ValueError(f"未知统计类别: {category}")
@@ -624,33 +773,42 @@ def record_call(user_id: int, category: str) -> None:
     now = _now_iso()
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO usage (user_id, chat, generate, edit, qa, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO usage (user_id, chat, generate, edit, qa, style, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(user_id) DO UPDATE SET "
             "chat = chat + excluded.chat, "
             "generate = generate + excluded.generate, "
             "edit = edit + excluded.edit, "
             "qa = qa + excluded.qa, "
+            "style = style + excluded.style, "
             "updated_at = excluded.updated_at",
             (user_id, values["chat"], values["generate"], values["edit"],
-             values["qa"], now),
+             values["qa"], values["style"], now),
+        )
+        conn.execute(
+            "INSERT INTO user_quota (user_id, used, updated_at) VALUES (?, 1, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "used = used + 1, updated_at = excluded.updated_at",
+            (user_id, now),
         )
         conn.commit()
 
 
 def get_usage_stats() -> dict:
-    """聚合统计（管理员只读）：4 类总数 / 注册人数 / 人均 / 占比。
+    """聚合统计（管理员只读）：5 类总数 / 注册人数 / 人均 / 占比。
 
     - user_count = users 表当前注册人数（含 0 次调用者）。
     - 人均 = 各类总数 ÷ user_count；占比 = 各类总数 ÷ 总调用 × 100。
     - 分母为 0 时对应项全部取 0。
+    - Spec18：total_calls = sum(totals.values()) 自动含 style；响应结构不变。
     """
     with _connect() as conn:
         row = conn.execute(
             "SELECT COALESCE(SUM(chat), 0)     AS chat, "
             "       COALESCE(SUM(generate), 0) AS generate, "
             "       COALESCE(SUM(edit), 0)     AS edit, "
-            "       COALESCE(SUM(qa), 0)       AS qa "
+            "       COALESCE(SUM(qa), 0)       AS qa, "
+            "       COALESCE(SUM(style), 0)    AS style "
             "FROM usage"
         ).fetchone()
         user_count = int(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"])
@@ -713,16 +871,19 @@ def get_cleared_times() -> dict:
 
 
 def clear_usage() -> int:
-    """清零四类调用计数（删行重计），返回清零前四类调用总次数。
+    """清零五类调用计数（删行重计），返回清零前五类调用总次数。
 
     - 删行而非逐列置 0：清零后首次成功调用由 record_call 的 UPSERT 重建新行、从 0 累计。
     - 只动 usage 表，users（注册人数）/ images / posts 等一概不碰。
+    - Spec18 §14.1：清零从此**只重置统计区间，不再有任何计费含义**——
+      user_quota 一个字都不动，超额用户不会被解封。
     - 同事务内记录 usage_cleared_at，作为新一段统计区间的起点。
     """
     with _connect() as conn:
         row = conn.execute(
             "SELECT COALESCE(SUM(chat), 0) + COALESCE(SUM(generate), 0) "
-            "     + COALESCE(SUM(edit), 0) + COALESCE(SUM(qa), 0) AS total "
+            "     + COALESCE(SUM(edit), 0) + COALESCE(SUM(qa), 0) "
+            "     + COALESCE(SUM(style), 0) AS total "
             "FROM usage"
         ).fetchone()
         total = int(row["total"])

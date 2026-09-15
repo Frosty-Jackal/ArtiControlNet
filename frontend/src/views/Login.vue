@@ -31,14 +31,25 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useAuthStore } from '../store/auth'
+import { takeQuotaNotice } from '../utils/quotaNotice'
 
 const auth = useAuthStore()
 const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
+
+// Spec18 §7.4：落地到登录页时，若有一条待显示的限额警告 → 红色提示行 + 弹窗。
+// 用户原话要求"弹出提示警告"，所以是 window.alert（而不是只写一行小字）。
+onMounted(() => {
+  const msg = takeQuotaNotice()
+  if (msg) {
+    error.value = msg
+    window.alert(msg)
+  }
+})
 
 async function submit() {
   if (!username.value.trim() || !password.value) {
@@ -51,6 +62,8 @@ async function submit() {
     await auth.login(username.value.trim(), password.value)
   } catch (e) {
     error.value = e.message || '登录失败'
+    // Spec18 §7.4：超额被拒时同样弹窗（错误对象带 code，见 api/chatApi.js）
+    if (e.code === 40304) window.alert(e.message)
   } finally {
     loading.value = false
   }

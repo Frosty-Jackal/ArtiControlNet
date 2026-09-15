@@ -1,5 +1,7 @@
 import axios from 'axios'
 
+import { setQuotaNotice } from '../utils/quotaNotice'
+
 // 后端独立部署时设 VITE_API_BASE（如 https://api.example.com）；默认同源 /api
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
@@ -32,9 +34,11 @@ http.interceptors.request.use((config) => {
 
 // 错误一律包成 Error，并把 HTTP 状态码挂到 err.status 上：
 // 渲染站内图片要区分「404 图片已删除」（Spec17 §3.4，渲染占位框）与其它错误（可重试）。
-function httpError(message, status) {
+// Spec18：再挂上业务错误码 err.code —— 四个 403（40301/02/03/04）只能靠它区分。
+function httpError(message, status, code) {
   const e = new Error(message)
   e.status = status
+  e.code = code
   return e
 }
 
@@ -44,7 +48,7 @@ http.interceptors.response.use(
     if (resp.config.responseType === 'blob') return resp
     const body = resp.data
     if (body && body.code !== 200) {
-      return Promise.reject(httpError(body.message || '请求失败', resp.status))
+      return Promise.reject(httpError(body.message || '请求失败', resp.status, body.code))
     }
     return resp
   },
@@ -55,12 +59,24 @@ http.interceptors.response.use(
     if (resp && err.config?.responseType === 'blob' && resp.data instanceof Blob) {
       return resp.data.text().then((txt) => {
         let msg = '请求失败'
-        try { msg = (JSON.parse(txt).message) || msg } catch (e) { /* 非 JSON 错误体 */ }
+        let code
+        try {
+          const parsed = JSON.parse(txt)
+          msg = parsed.message || msg
+          code = parsed.code
+        } catch (e) { /* 非 JSON 错误体 */ }
         if (resp.status === 401 && !url.includes('/api/auth/login')) {
           clearToken()
           window.dispatchEvent(new Event('artcn:unauthorized'))
         }
-        return Promise.reject(httpError(msg, resp.status))
+        // Spec18 §7.2b：作品库/社区图片的 <img> 渲染请求也会被中间件拦，
+        // 不处理会让图片静默裂掉而没有登出。
+        if (resp.status === 403 && code === 40304 && !url.includes('/api/auth/login')) {
+          clearToken()
+          setQuotaNotice(msg)
+          window.dispatchEvent(new Event('artcn:quota_exceeded'))
+        }
+        return Promise.reject(httpError(msg, resp.status, code))
       })
     }
     const body = resp?.data
@@ -69,8 +85,16 @@ http.interceptors.response.use(
       clearToken()
       window.dispatchEvent(new Event('artcn:unauthorized'))
     }
+    // Spec18 §7.2b：服务次数耗尽 → 清 token 回登录页 + 记下提示，
+    // 由 Login.vue 挂载时弹出。守卫与 401 分支同款：登录接口自己被拒时，
+    // 用户本来就在登录页，不该派发"被踢"事件（提示由 Login.vue 的 catch 弹）。
+    if (resp?.status === 403 && body?.code === 40304 && !url.includes('/api/auth/login')) {
+      clearToken()
+      setQuotaNotice(body?.message)
+      window.dispatchEvent(new Event('artcn:quota_exceeded'))
+    }
     const msg = (body && body.message) || err.message || '网络错误'
-    return Promise.reject(httpError(msg, resp?.status))
+    return Promise.reject(httpError(msg, resp?.status, body?.code))
   }
 )
 
@@ -128,7 +152,16 @@ export async function me() {
 
 export async function listUsers() {
   const { data } = await http.get('/api/admin/users')
-  return data.data // [{ id, username, is_admin, created_at }]
+  // [{ id, username, is_admin, created_at, quota_limit, used }]（Spec18 §6.1，无 password_hash）
+  return data.data
+}
+
+// Spec18 §6.2：设置某用户的累计服务限额（仅管理员）
+export async function updateUserQuota(userId, quotaLimit) {
+  const { data } = await http.put(`/api/admin/users/${userId}/quota`, {
+    quota_limit: quotaLimit
+  })
+  return data.data // { id, quota_limit, used }
 }
 
 export async function createUser(username, password) {

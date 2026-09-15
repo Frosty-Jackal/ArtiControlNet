@@ -6,6 +6,8 @@
 """
 from typing import Optional
 
+import config
+
 
 class AppError(Exception):
     """业务错误基类。code 为业务错误码，status_code 为该错误对应的 HTTP 状态。"""
@@ -213,6 +215,32 @@ class CommentNotFoundError(NotFoundError):
 
     def __init__(self, message="评论不存在"):
         super().__init__(message, code=40408)
+
+
+# ---- 服务限额（Spec18 §9，追加到 Spec17 §9 之后）----
+
+class QuotaExceededError(AppError):
+    """普通用户的服务调用次数已达限额（登录被拒 / 已在系统里被踢出）。
+
+    HTTP 403 而非 401：登录态本身是有效的，只是无权继续使用。用 401 会被前端
+    既有的"401 → 清 token"分支当成 token 失效处理——结果碰巧一样，但语义错，
+    且会让日志里分不清"登录态坏了"和"额度用完了"。
+
+    提示语来自 config.QUOTA_EXCEEDED_MESSAGE（唯一来源，前端零副本）。
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(40304, message or config.QUOTA_EXCEEDED_MESSAGE, status_code=403)
+
+
+class QuotaLimitError(BadRequestError):
+    """管理员设置的限额非法（负数，或超过 QUOTA_LIMIT_MAX）。"""
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message or f"服务限额需为 0~{config.QUOTA_LIMIT_MAX} 之间的整数",
+            code=40017,
+        )
 
 
 class InternalError(AppError):

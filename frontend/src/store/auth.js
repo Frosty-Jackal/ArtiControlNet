@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { clearToken, getToken, login as apiLogin, me as apiMe } from '../api/chatApi'
+import { setQuotaNotice } from '../utils/quotaNotice'
 
 // 登录态存 localStorage；登出 = 清 token（Spec2 §3 范围内）
 const TOKEN_KEY = 'artcn_token'
@@ -25,7 +26,10 @@ export const useAuthStore = defineStore('auth', {
         this.username = info.username
         this.isAdmin = info.is_admin
       } catch (e) {
-        this.logout() // token 失效 / 过期
+        // Spec18 §7.3：启动时已超额（如换了设备登录、或后端在本设备停用期间被改小限额）
+        // ——没有这一行，被踢的用户会**静默**回到登录页，不知道发生了什么。
+        if (e.code === 40304) setQuotaNotice(e.message)
+        this.logout() // token 失效 / 过期 / 超额
       } finally {
         this.loaded = true
       }

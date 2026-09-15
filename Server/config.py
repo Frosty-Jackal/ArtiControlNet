@@ -74,6 +74,18 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 AUTH_DB_PATH = BASE_DIR / "artcn.db"                  # 本地 SQLite 账号库（持久化，与 storage/ 无关）
 
+# ===== 服务限额（Spec18：API 服务调用计量与用户限额）=====
+QUOTA_DEFAULT_LIMIT = int(os.getenv("QUOTA_DEFAULT_LIMIT", "25"))    # 新建用户的默认限额（累计次数）
+QUOTA_LIMIT_MAX = int(os.getenv("QUOTA_LIMIT_MAX", "100000"))        # 管理员可设的限额上限（防误输入天文数字）
+QUOTA_CONTACT_EMAIL = os.getenv("QUOTA_CONTACT_EMAIL", "frostyj@qq.com").strip()
+# 超额提示语（唯一来源；前端只负责显示后端返回的 message，不做同值副本）
+QUOTA_EXCEEDED_MESSAGE = (
+    f"您的服务次数已达上限，请联系管理员续费可继续使用！（管理员邮箱：{QUOTA_CONTACT_EMAIL}）"
+)
+# 注意 QUOTA_DEFAULT_LIMIT 的作用域：它只在「新建用户」与「补列迁移给存量行填初值」两处生效，
+# 改它**不会**影响任何已存在的用户（Spec18 §3.3-5）。要给某人加额度走
+# PUT /api/admin/users/{id}/quota。
+
 # ===== 任务引擎 =====
 MAX_PENDING_TASKS = int(os.getenv("MAX_PENDING_TASKS", "100"))     # 待处理上限，超过返回 50301
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "300"))

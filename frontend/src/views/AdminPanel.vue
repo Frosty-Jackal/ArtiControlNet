@@ -40,6 +40,8 @@
             <th>ID</th>
             <th>用户名</th>
             <th>角色</th>
+            <th>服务总调用次数</th>
+            <th>服务限额</th>
             <th>创建时间</th>
             <th>操作</th>
           </tr>
@@ -55,6 +57,23 @@
               <span :class="u.is_admin ? 'role-admin' : 'role-normal'">
                 {{ u.is_admin ? '管理员' : '普通' }}
               </span>
+            </td>
+            <!-- Spec18 §7.5b：超额只打标记，不整行变红（那会让表格看起来全是错的） -->
+            <td class="cell-quota">
+              {{ u.used }}
+              <span v-if="isOverQuota(u)" class="quota-over-tag">已超额</span>
+            </td>
+            <td class="cell-quota">
+              <!-- 管理员恒不判限额（§2.1），给一个改了没用的输入框是骗人 -->
+              <template v-if="u.is_admin">
+                <span class="cell-muted">不受限</span>
+              </template>
+              <template v-else>
+                {{ u.quota_limit }}
+                <button class="btn-mini" :disabled="busyId === u.id" @click="editQuota(u)">
+                  改限额
+                </button>
+              </template>
             </td>
             <td class="cell-muted">{{ u.created_at }}</td>
             <td class="row-actions">
@@ -91,7 +110,8 @@ import {
   deleteUser,
   listUsers,
   resetUserPassword,
-  setUserAdmin
+  setUserAdmin,
+  updateUserQuota
 } from '../api/chatApi'
 import { useAuthStore } from '../store/auth'
 
@@ -155,6 +175,43 @@ async function resetPassword(u) {
     flash(`已重置「${u.username}」的密码`)
   } catch (e) {
     error.value = e.message || '重置失败'
+  } finally {
+    busyId.value = null
+  }
+}
+
+// Spec18 §7.5：超额的判据与后端一致（used >= quota_limit），管理员恒不超额
+function isOverQuota(u) {
+  return !u.is_admin && u.used >= u.quota_limit
+}
+
+// Spec18 §7.5：改服务限额（window.prompt，与隔壁「重置密码」同款交互）
+async function editQuota(u) {
+  const input = window.prompt(
+    `为「${u.username}」设置服务限额（累计可用次数，当前 ${u.quota_limit}）：`,
+    String(u.quota_limit)
+  )
+  if (input === null) return                  // 取消
+  const raw = input.trim()
+  const n = Number(raw)
+  // raw 为空必须单独拦：Number('') === 0，是个整数——不拦的话"清空输入框直接确定"
+  // 会把限额静默设成 0（= 禁用该账号）
+  // 用 Number.isInteger 而非 parseInt：parseInt("25abc") 会静默变成 25，
+  // 静默纠正用户的输入是坏事。
+  // 上限（QUOTA_LIMIT_MAX）不在前端校验——它由后端 40017 的 message 显示在 error 行，
+  // 前端复制一份就多一个会漂移的常量。
+  if (!raw || !Number.isInteger(n) || n < 0) {
+    error.value = '限额需为不小于 0 的整数'
+    return
+  }
+  error.value = ''
+  busyId.value = u.id
+  try {
+    await updateUserQuota(u.id, n)
+    flash(`已将「${u.username}」的服务限额设为 ${n} 次`)
+    await load()
+  } catch (e) {
+    error.value = e.message || '设置限额失败'
   } finally {
     busyId.value = null
   }

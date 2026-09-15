@@ -850,6 +850,17 @@ input, textarea {
   border-radius: var(--radius-full);
 }
 
+/* Spec18：超额标记（用户管理页），形状抄 .me-tag（main.css:843），换成红底。
+   不用整行变红：一个用户超额不该让整行变成警告色。 */
+.quota-over-tag {
+  margin-left: 6px;
+  padding: 1px 8px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
 .role-admin {
   color: var(--purple-300);
   font-weight: 600;
