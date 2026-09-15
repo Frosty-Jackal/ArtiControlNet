@@ -1,14 +1,13 @@
 <template>
   <div class="bubble-row" :class="message.role === 'user' ? 'row-user' : 'row-assistant'">
     <div class="bubble" :class="message.role === 'user' ? 'bubble-user' : 'bubble-assistant'">
-      <!-- 用户消息：文本 + 图片 -->
+      <!-- 用户消息：文本 + 图片（Spec17 §7.6：图片走作品库引用，本地预览只用于"上传中"） -->
       <template v-if="message.role === 'user'">
-        <img
-          v-if="message.imageUrl || message.imageUrlPreview"
-          :src="message.imageUrl || message.imageUrlPreview"
-          class="bubble-img user-img"
-          alt="参考图"
-        />
+        <template v-if="hasImage">
+          <div v-if="imageMissing" class="bubble-img bubble-img-missing">图片已删除</div>
+          <img v-else-if="imageSrc" :src="imageSrc" class="bubble-img user-img" alt="参考图" />
+          <div v-else class="bubble-img bubble-img-missing">…</div>
+        </template>
         <p v-if="message.text" class="bubble-text">{{ message.text }}</p>
       </template>
 
@@ -20,19 +19,20 @@
       <!-- 助手：文本（Markdown 渲染） -->
       <div v-else-if="message.kind === 'text'" class="bubble-text markdown-body" v-html="renderedText" />
 
-      <!-- 助手：结果图 -->
+      <!-- 助手：结果图（单个 image_id → 作品库；已被删除时渲染占位，不可点开大图） -->
       <div v-else-if="message.kind === 'images'" class="images-grid">
+        <div v-if="imageMissing" class="bubble-img bubble-img-missing">图片已删除</div>
         <a
-          v-for="(img, i) in message.images"
-          :key="i"
+          v-else-if="imageSrc"
           class="image-link"
-          :href="img"
+          :href="imageSrc"
           target="_blank"
           rel="noopener"
-          :title="'查看大图 ' + (i + 1)"
+          title="查看大图"
         >
-          <img :src="img" class="bubble-img result-img" :alt="'生成结果 ' + (i + 1)" loading="lazy" />
+          <img :src="imageSrc" class="bubble-img result-img" alt="生成结果" loading="lazy" />
         </a>
+        <div v-else class="bubble-img bubble-img-missing">…</div>
       </div>
 
       <!-- 助手：失败 + 重试 -->
@@ -67,12 +67,22 @@
 <script setup>
 import { computed } from 'vue'
 import TypingIndicator from './TypingIndicator.vue'
+import { useAuthedImage } from '../composables/useAuthedImage'
 import { renderMarkdown } from '../utils/markdown'
 
 const props = defineProps({
   message: { type: Object, required: true }
 })
 defineEmits(['retry', 'vote'])
+
+// 站内图片（作品库文件）带 token 拉取 → objectURL；404 = 图片已被删（Spec17 §3.4）
+const { src: authedSrc, missing: authedMissing } = useAuthedImage(() => props.message.imageId)
+
+// 用户消息可能仍在上传（只有本地预览），此时 imageId 还是空
+const hasImage = computed(() => !!(props.message.imageId || props.message.imageUrlPreview))
+const imageSrc = computed(() => authedSrc.value || props.message.imageUrlPreview || '')
+// 只有"确实引用了作品库图片"才谈缺失；纯本地预览阶段不算
+const imageMissing = computed(() => !!props.message.imageId && authedMissing.value)
 
 // 只在助手文本上渲染 Markdown（用户消息保持纯文本）
 const renderedText = computed(() => renderMarkdown(props.message.text || ''))

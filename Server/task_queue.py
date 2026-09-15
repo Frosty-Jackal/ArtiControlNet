@@ -6,13 +6,14 @@
 - 终态任务保留 TERMINAL_TASK_TTL_SECONDS 后由 prune 淘汰。
 """
 import asyncio
-import itertools
 import logging
+import sqlite3
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 import config
+import db
 from errors import AppError, QueueCapacityError
 
 logger = logging.getLogger("task_queue")
@@ -22,6 +23,27 @@ Handler = Callable[["Task"], Awaitable[dict]]
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _load_next_task_id() -> int:
+    """从 app_meta['task_id_seq'] 续号，返回下一个可用 task_id（Spec17 §3.4）。
+
+    计数器原本是 `itertools.count(1)`，后端每次重启都从 1 重排。对话进库后
+    历史气泡的 👍/👎 要长期存活，而 feedback 表是 UNIQUE(task_id)——重启归零
+    会让旧票与新任务撞号、静默覆盖别人的行。持久化后 task_id 全局单调、永不重用。
+
+    键不存在（全新库 / 从未发过号）或库还没建表 → 从 1 起。读出的值非法
+    （被手工改坏）也退回 1，不让一条脏数据卡死启动。
+    """
+    try:
+        raw = db.get_meta(db.TASK_ID_SEQ_KEY)
+    except sqlite3.Error:
+        logger.warning("task_id_seq 读取失败，计数器从 1 起", extra={"event": "db.migrate"})
+        return 1
+    try:
+        return int(raw) + 1
+    except (TypeError, ValueError):
+        return 1
 
 
 class Task:
@@ -67,7 +89,7 @@ class TaskQueue:
         )
         self._registry: dict[int, Task] = {}
         self._lock = asyncio.Lock()
-        self._counter = itertools.count(1)
+        self._next_id = _load_next_task_id()   # 从 app_meta 续号（Spec17 §3.4）
         self._timeout = timeout or config.TASK_TIMEOUT_SECONDS
         self._worker_task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
@@ -92,7 +114,12 @@ class TaskQueue:
     async def submit(self, *, thread_id: str, kind: str,
                      request: dict, request_id: str) -> Task:
         async with self._lock:
-            task = Task(next(self._counter), thread_id, kind, request, request_id)
+            task_id = self._next_id
+            self._next_id += 1
+            # 先落盘再入队：写失败则本次提交整体失败，不留下已注册但永不入队的任务。
+            # QueueFull 时号已经写回了——**空洞无害**，feedback 只要求唯一不要求连续（§5.3）。
+            db.set_meta(db.TASK_ID_SEQ_KEY, str(task_id))
+            task = Task(task_id, thread_id, kind, request, request_id)
             self._registry[task.id] = task
         try:
             self._queue.put_nowait(task.id)

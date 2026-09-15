@@ -1,6 +1,7 @@
 """图片落盘 / 读取 / 转存 / 校验（storage/ 临时目录，TTL 1h，非持久化）。
 
 统一约定：站内图片以 /images/{file} 表示；对外返回绝对 URL。
+Spec17 起另认一种站内引用：/api/gallery/{id}/file（作品库，持久），见 fetch_image_bytes。
 """
 import asyncio
 import base64
@@ -15,10 +16,14 @@ import httpx
 from PIL import Image
 
 import config
+import db
 from errors import (FileMissingError, ImageProcessError, ImageTooLargeError,
                     UnsupportedImageTypeError)
 
 _FILENAME_SAFE = re.compile(r"^[a-zA-Z0-9_\-]+\.(jpg|jpeg|png|webp|gif)$")
+
+# 作品库引用（Spec17 §5.2A）：/api/gallery/{id}/file
+_GALLERY_REF = re.compile(r"^/api/gallery/(\d+)/file$")
 
 _MIME_BY_EXT = {
     ".jpg": "image/jpeg",
@@ -66,13 +71,40 @@ def _read_storage(path_or_url: str) -> bytes:
 
 
 def is_local_site_url(image_url: str) -> bool:
-    return image_url.startswith("/images/")
+    return image_url.startswith("/images/") or bool(_GALLERY_REF.match(image_url))
+
+
+def _read_gallery_ref(image_id: int) -> bytes:
+    """按 images.id 读 gallery/ 原图（Spec17 §5.2A）。
+
+    与 /images/ 分支对称：子 Agent 拿到的会话历史里，图片地址就是这种形态
+    （POST /api/chat 与 ThreadStore 回填都写它），不认它就等于回填了个死链。
+
+    **不做归属校验**（沿用 Spec17 §5.2A 的决策）：调用方是子 Agent，此函数只在
+    服务端内部被调用，不对外暴露任何 HTTP 接口；对外读图一律走
+    `GET /api/gallery/{id}/file`（那条有 40403 归属校验）。
+    文件名仍按白名单校验，防止 images 行被写脏后拼出目录穿越路径。
+    """
+    record = db.get_image_record(image_id)
+    if record is None:
+        raise ImageProcessError(f"图片不存在或已删除: gallery/{image_id}")
+    if not _FILENAME_SAFE.match(record["file_name"]):
+        raise ImageProcessError(f"非法图片文件名: gallery/{image_id}")
+    fp = config.GALLERY_DIR / record["file_name"]
+    if not fp.exists():
+        raise ImageProcessError(f"图片文件缺失: gallery/{image_id}")
+    return fp.read_bytes()
 
 
 async def fetch_image_bytes(image_url: str, public_base: str = "") -> bytes:
-    """取图片字节。优先读本地 storage/（自己站点的 URL），否则 httpx 下载。"""
+    """取图片字节。优先读本地（storage/ 或 gallery/，自己站点的引用），否则 httpx 下载。"""
     if not image_url:
         raise ImageProcessError("缺少图片地址")
+
+    # 作品库引用（本站内部路径）
+    m = _GALLERY_REF.match(image_url)
+    if m:
+        return _read_gallery_ref(int(m.group(1)))
 
     # 本站相对路径
     if image_url.startswith("/images/"):
@@ -82,6 +114,9 @@ async def fetch_image_bytes(image_url: str, public_base: str = "") -> bytes:
     base_netloc = urlparse(public_base or "").netloc
     # 绝对 URL 指向本站 → 直接读本地文件，避免自环 HTTP
     if parsed.netloc and base_netloc and parsed.netloc == base_netloc:
+        m = _GALLERY_REF.match(parsed.path)
+        if m:
+            return _read_gallery_ref(int(m.group(1)))
         if parsed.path.startswith("/images/"):
             return _read_storage(parsed.path)
 

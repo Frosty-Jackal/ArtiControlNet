@@ -65,18 +65,72 @@ _CREATE_IMAGES_INDEX = (
     "ON images(user_id, created_at DESC)"
 )
 
-# 社区帖子表（Spec9 §5.2）：单图 + 文字；图片字节在 Server/community/。
+# 社区帖子表（Spec9 §5.2）：文字 + 可选单图；图片字节在 Server/community/。
+# Spec17 §5.1c：image_file / ext 改为可空——帖子可以只有文字（纯文字帖）。
 _CREATE_POSTS_TABLE = """
 CREATE TABLE IF NOT EXISTS posts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,             -- 作者
     text       TEXT NOT NULL,                -- 心得文字（1~1000 字，前后端校验）
-    image_file TEXT NOT NULL,                -- community/ 下持久文件名（uuid + ext）
-    ext        TEXT NOT NULL,                -- .jpg|.jpeg|.png|.webp|.gif
+    image_file TEXT,                         -- community/ 下持久文件名；纯文字帖为 NULL
+    ext        TEXT,                         -- .jpg|.jpeg|.png|.webp|.gif；纯文字帖为 NULL
     created_at TEXT NOT NULL
 )
 """
 _CREATE_POSTS_INDEX = "CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC)"
+
+# 帖子评论（Spec17 §5.1d）：只增不删不改——**没有 updated_at 列**，
+# 因为评论不可编辑（§2.3）。要改只能删了重发。
+_CREATE_POST_COMMENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS post_comments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id    INTEGER NOT NULL,             -- 引用 posts.id
+    user_id    INTEGER NOT NULL,             -- 评论者
+    text       TEXT    NOT NULL,             -- 1~COMMENT_TEXT_MAX 字
+    created_at TEXT    NOT NULL
+)
+"""
+_CREATE_POST_COMMENTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_post_comments_post "
+    "ON post_comments(post_id, id)"
+)
+
+# 对话（Spec17 §5.1a）：按用户保存的聊天分段。
+# id 沿用既有的 thread_id 形态（t_ + uuid4 前 8 位），前端/后端/日志三处同一个值。
+_CREATE_CONVERSATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id         TEXT PRIMARY KEY,          -- = thread_id（t_xxxxxxxx）
+    user_id    INTEGER NOT NULL,          -- 归属用户（删用户级联）
+    created_at TEXT NOT NULL,             -- 发起时间（侧边栏显示的就是它）
+    updated_at TEXT NOT NULL              -- 最后一条消息时刻（列表排序用）
+)
+"""
+_CREATE_CONVERSATIONS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_conversations_user "
+    "ON conversations(user_id, updated_at DESC)"
+)
+
+# 对话消息（Spec17 §5.1b）：记录用户与助手双方的内容。
+# image_id 引用 images.id（Spec5 作品库）——**不复制字节**；该图可能被用户在
+# 「我的作品」里删掉，此时本行成为悬挂引用，前端渲染 404 → 「图片已删除」占位。
+# task_id / tool 仅助手侧的工具结果有值（Spec9 反馈行用）。
+_CREATE_CHAT_MESSAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    conv_id    TEXT    NOT NULL,          -- conversations.id
+    user_id    INTEGER NOT NULL,          -- 归属用户（删用户级联）
+    role       TEXT    NOT NULL,          -- 'user' | 'assistant'
+    text       TEXT,                      -- 文本内容（纯图片消息为 NULL）
+    image_id   INTEGER,                   -- images.id（无图为 NULL）
+    task_id    INTEGER,                   -- 该结果的 task_id（仅工具结果；反馈用）
+    tool       TEXT,                      -- 'generate_image'|'edit_image'|'qa_image'
+    created_at TEXT    NOT NULL
+)
+"""
+_CREATE_CHAT_MESSAGES_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_conv "
+    "ON chat_messages(conv_id, id)"
+)
 
 # 帖子点赞/点踩（Spec9 §5.2）：每帖每用户一行
 _CREATE_POST_VOTES_TABLE = """
@@ -164,6 +218,11 @@ _PENDING_SOURCES = ("generate", "edit", "upload")
 
 # app_meta 键：值 = UTC ISO 时间，表示"存量上传作品已放回待考虑队列"（Spec15 §5.1b）
 WIKI_UPLOAD_MIGRATED_KEY = "wiki_upload_migrated"
+
+# app_meta 键：值 = 已发出的最大 task_id（十进制字符串）。
+# Spec17 §3.4：TaskQueue 是内存发号器，重启从 1 重排会让持久化对话里的
+# 历史 👍/👎 与新任务撞号，覆盖他人 feedback 行。持久化后 task_id 全局单调、永不重用。
+TASK_ID_SEQ_KEY = "task_id_seq"
 
 
 def _now_iso() -> str:
@@ -257,6 +316,53 @@ def _suggestion_row_to_dict(row: sqlite3.Row | None) -> dict | None:
     }
 
 
+def _conversation_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    """对话行 → dict（Spec17 §5.1a）。"""
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _chat_message_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    """对话消息行 → dict（Spec17 §5.1b）。"""
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "conv_id": row["conv_id"],
+        "user_id": row["user_id"],
+        "role": row["role"],
+        "text": row["text"],
+        "image_id": row["image_id"],
+        "task_id": row["task_id"],
+        "tool": row["tool"],
+        "created_at": row["created_at"],
+    }
+
+
+def _post_comment_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    """评论行 → dict（Spec17 §5.1d）；带上 JOIN users 得到的 author 字段。"""
+    if row is None:
+        return None
+    keys = row.keys()
+    record = {
+        "id": row["id"],
+        "post_id": row["post_id"],
+        "user_id": row["user_id"],
+        "text": row["text"],
+        "created_at": row["created_at"],
+    }
+    if "author" in keys:
+        record["author"] = row["author"]
+        record["author_is_admin"] = bool(row["author_is_admin"])
+    return record
+
+
 # ---------- 生命周期 ----------
 
 def _migrate_images_wiki_used(conn: sqlite3.Connection) -> None:
@@ -305,6 +411,42 @@ def _migrate_images_note(conn: sqlite3.Connection) -> None:
         logger.info("images.note 列已补齐", extra={"event": "db.migrate"})
 
 
+def _migrate_posts_nullable_image(conn: sqlite3.Connection) -> None:
+    """存量库把 posts.image_file / ext 改为可空（Spec17 §5.1c：纯文字帖）。
+
+    SQLite 不支持 ALTER COLUMN，只能重建表。幂等判据：PRAGMA 查得 image_file
+    的 notnull 标志为 1 才动手——重建后该标志变 0，再启动不会重复执行。
+    新建库由 _CREATE_POSTS_TABLE 直接写成可空，本函数只服务已存在的 artcn.db，
+    两条路径最终 schema 一致。
+
+    DROP TABLE posts 会连带删掉 idx_posts_created，故重建后一并补回。
+    脚本用显式 BEGIN/COMMIT 包住：executescript 本身不开启事务，不写这两句
+    就没有"失败即回滚、posts 表保持原样"的保证（§3.4 的前提）。
+    """
+    cols = {r["name"]: r["notnull"]
+            for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    if not cols.get("image_file"):
+        return                                  # 已是可空 / 列不存在 → 无事可做
+    conn.executescript("""
+        BEGIN;
+        CREATE TABLE posts_new (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            text       TEXT    NOT NULL,
+            image_file TEXT,
+            ext        TEXT,
+            created_at TEXT    NOT NULL
+        );
+        INSERT INTO posts_new (id, user_id, text, image_file, ext, created_at)
+            SELECT id, user_id, text, image_file, ext, created_at FROM posts;
+        DROP TABLE posts;
+        ALTER TABLE posts_new RENAME TO posts;
+        CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
+        COMMIT;
+    """)
+    logger.info("posts.image_file / ext 已改为可空", extra={"event": "db.migrate"})
+
+
 def init_db() -> None:
     """建表；users 表为空时按 .env 配置创建初始管理员。"""
     AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +465,12 @@ def init_db() -> None:
         conn.execute(_CREATE_SUGGESTIONS_INDEX)
         conn.execute(_CREATE_META_TABLE)
         conn.execute(_CREATE_WIKI_TABLE)
+        conn.execute(_CREATE_CONVERSATIONS_TABLE)
+        conn.execute(_CREATE_CONVERSATIONS_INDEX)
+        conn.execute(_CREATE_CHAT_MESSAGES_TABLE)
+        conn.execute(_CREATE_CHAT_MESSAGES_INDEX)
+        conn.execute(_CREATE_POST_COMMENTS_TABLE)
+        conn.execute(_CREATE_POST_COMMENTS_INDEX)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         # Spec12 §5.1b：存量库补 images.wiki_used 列
@@ -331,6 +479,8 @@ def init_db() -> None:
         _migrate_upload_wiki_used(conn)
         # Spec16 §5.1b：存量库补 images.note 列
         _migrate_images_note(conn)
+        # Spec17 §5.1c：存量库把 posts.image_file / ext 改为可空（纯文字帖）
+        _migrate_posts_nullable_image(conn)
         conn.commit()
     if count_users() > 0:
         return
@@ -426,13 +576,16 @@ def set_admin(user_id: int, is_admin: bool) -> bool:
 
 
 def delete_user(user_id: int) -> bool:
-    """删除用户；连带删除其 usage / images / 社区 / 反馈 / 分享 / 建议 / wiki 记录，
-    保证口径一致（Spec4 §3 / Spec5 §3 / Spec9 §3 / Spec12 §5.3）。
+    """删除用户；连带删除其 usage / images / 社区 / 反馈 / 分享 / 建议 / wiki /
+    对话 / 评论记录，保证口径一致（Spec4 §3 / Spec5 §3 / Spec9 §3 / Spec12 §5.3 / Spec17 §5.1f）。
 
     注意：仅删除数据库记录。gallery/ 物理文件由 gallery.delete_user_gallery 负责、
     community/ 物理文件由 community.delete_user_posts 负责（都先取文件名再删文件，
     见 main.py admin_delete_user）。帖子投票：本函数删该用户投过的票；其帖子上的
     他人投票由 delete_user_post_records 一并处理。
+
+    Spec17 §5.1f 顺序要求：删"该用户帖子上的他人评论"必须排在 `DELETE FROM posts`
+    **之前**，否则子查询已经取不到帖子 id。
     """
     with _connect() as conn:
         conn.execute("DELETE FROM usage WHERE user_id = ?", (user_id,))
@@ -442,6 +595,15 @@ def delete_user(user_id: int) -> bool:
         conn.execute("DELETE FROM shares WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM suggestions WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM wiki WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
+        # 评论：先清"挂在该用户帖子上的（含他人的）"，再清"该用户发出的"——顺序不能反
+        conn.execute(
+            "DELETE FROM post_comments WHERE post_id IN "
+            "(SELECT id FROM posts WHERE user_id = ?)",
+            (user_id,),
+        )
+        conn.execute("DELETE FROM post_comments WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM posts WHERE user_id = ?", (user_id,))
         cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
@@ -533,6 +695,13 @@ def get_meta(key: str) -> str | None:
     with _connect() as conn:
         row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+def set_meta(key: str, value: str) -> None:
+    """写一条 app_meta（公开入口，Spec17 §5.1e 起供 TaskQueue 持久化 task_id 用）。"""
+    with _connect() as conn:
+        _upsert_meta(conn, key, value)
+        conn.commit()
 
 
 def get_cleared_times() -> dict:
@@ -662,12 +831,15 @@ def get_post_record(post_id: int) -> dict | None:
 def list_posts(user_id: int, offset: int, limit: int) -> list[dict]:
     """社区帖子列表（最新在前），每项含作者信息、like/dislike 计数与当前用户 my_vote。
 
-    字段：id / user_id / text / created_at / author / author_is_admin /
+    字段：id / user_id / text / image_file / created_at / author / author_is_admin /
     like_count / dislike_count / my_vote（null|like|dislike）。
+
+    Spec17：带出 image_file——它是"有没有图"的唯一判据（纯文字帖为 NULL），
+    业务层据此决定 image_url 是路径还是 None。**不对外暴露**：路由响应里没有这一项。
     """
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT p.id, p.user_id, p.text, p.created_at, "
+            "SELECT p.id, p.user_id, p.text, p.image_file, p.created_at, "
             "       u.username AS author, u.is_admin AS author_is_admin, "
             "       COALESCE(SUM(CASE WHEN pv.vote = 'like' THEN 1 ELSE 0 END), 0) AS like_count, "
             "       COALESCE(SUM(CASE WHEN pv.vote = 'dislike' THEN 1 ELSE 0 END), 0) AS dislike_count, "
@@ -686,6 +858,7 @@ def list_posts(user_id: int, offset: int, limit: int) -> list[dict]:
             "id": r["id"],
             "user_id": r["user_id"],
             "text": r["text"],
+            "image_file": r["image_file"],
             "created_at": r["created_at"],
             "author": r["author"],
             "author_is_admin": bool(r["author_is_admin"]),
@@ -698,21 +871,27 @@ def list_posts(user_id: int, offset: int, limit: int) -> list[dict]:
 
 
 def delete_post_record(post_id: int) -> str | None:
-    """删除帖子记录，返回其 image_file（供删除物理文件）；不存在返回 None。"""
+    """删除帖子记录及其全部评论，返回其 image_file（供删除物理文件）。
+
+    不存在返回 None；纯文字帖（Spec17）的 image_file 本身也是 None——两种 None
+    在调用方走的是同一个 `_unlink_community_file` 分支，无需区分。
+    """
     with _connect() as conn:
         row = conn.execute("SELECT image_file FROM posts WHERE id = ?", (post_id,)).fetchone()
         if row is None:
             return None
         conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
         conn.execute("DELETE FROM post_votes WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM post_comments WHERE post_id = ?", (post_id,))
         conn.commit()
     return row["image_file"]
 
 
 def delete_user_post_records(user_id: int) -> list[str]:
-    """删除某用户全部帖子记录与其相关投票，返回被删帖子的 image_file 列表（供删除物理文件）。
+    """删除某用户全部帖子记录与其相关投票/评论，返回被删帖子的 image_file 列表（供删物理文件）。
 
-    同时清理：该用户帖子上的他人投票 + 该用户投过的所有票。
+    同时清理：该用户帖子上的他人投票 + 该用户投过的所有票 + 该用户发出的全部评论
+    + 挂在其帖子上的他人评论（Spec17 §5.1f）。
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -725,6 +904,13 @@ def delete_user_post_records(user_id: int) -> list[str]:
             (user_id,),
         )
         conn.execute("DELETE FROM post_votes WHERE user_id = ?", (user_id,))
+        # 评论两处清理都必须在 DELETE FROM posts 之前（子查询要能取到帖子 id）
+        conn.execute(
+            "DELETE FROM post_comments WHERE post_id IN "
+            "(SELECT id FROM posts WHERE user_id = ?)",
+            (user_id,),
+        )
+        conn.execute("DELETE FROM post_comments WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM posts WHERE user_id = ?", (user_id,))
         conn.commit()
     return names
@@ -1060,3 +1246,190 @@ def commit_style_update(user_id: int, style: str,
             _mark_images_wiki_used(conn, user_id, used_image_ids)
         conn.commit()
     return get_wiki(user_id)
+
+
+# ---------- 对话历史（Spec17 §5.1g） ----------
+
+def ensure_conversation(conv_id: str, user_id: int) -> dict:
+    """取对话；不存在则建（created_at = updated_at = now）。返回记录 dict。
+
+    用 ON CONFLICT DO NOTHING 而非"先查后插"：并发两次提交同一 thread_id 时
+    两条 INSERT 都不会撞主键，第二个静默落空（Spec17 §5.3）。
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO conversations (id, user_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+            (conv_id, user_id, now, now),
+        )
+        conn.commit()
+    return get_conversation(conv_id)
+
+
+def get_conversation(conv_id: str) -> dict | None:
+    """按 id 取对话；不存在返回 None。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM conversations WHERE id = ?", (conv_id,)
+        ).fetchone()
+    return _conversation_row_to_dict(row)
+
+
+def find_owned_conversation(conv_id: str, user_id: int) -> dict | None:
+    """取本人对话；不存在或不属于本人一律返回 None（调用方转 40407，不泄露存在性）。"""
+    conv = get_conversation(conv_id)
+    if conv is None or conv["user_id"] != user_id:
+        return None
+    return conv
+
+
+def list_conversations(user_id: int, limit: int) -> list[dict]:
+    """本人对话列表，updated_at 倒序（侧边栏排序用，显示的是 created_at）。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM conversations WHERE user_id = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    return [_conversation_row_to_dict(r) for r in rows]
+
+
+def touch_conversation(conv_id: str) -> None:
+    """把 updated_at 推到当前时刻（每次追加消息后调用）。"""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (_now_iso(), conv_id),
+        )
+        conn.commit()
+
+
+def add_chat_message(conv_id: str, user_id: int, role: str, *,
+                     text: str | None, image_id: int | None,
+                     task_id: int | None, tool: str | None) -> dict:
+    """追加一条消息并 touch 对话（同一事务）。返回完整记录 dict。
+
+    消息 INSERT 与对话 UPDATE 同一事务，避免出现"消息在但顺序不对"（Spec17 §5.3）。
+    调用方负责保证 conversations 行已存在（先 ensure_conversation）。
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO chat_messages "
+            "(conv_id, user_id, role, text, image_id, task_id, tool, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (conv_id, user_id, role, text, image_id, task_id, tool, now),
+        )
+        conn.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conv_id)
+        )
+        conn.commit()
+        message_id = cur.lastrowid
+    return get_chat_message(message_id)
+
+
+def get_chat_message(message_id: int) -> dict | None:
+    """按 id 取单条消息（add_chat_message 回读用）。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM chat_messages WHERE id = ?", (message_id,)
+        ).fetchone()
+    return _chat_message_row_to_dict(row)
+
+
+def list_chat_messages(conv_id: str) -> list[dict]:
+    """某段对话的全部消息，按 id 升序（= 时间正序）。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE conv_id = ? ORDER BY id ASC",
+            (conv_id,),
+        ).fetchall()
+    return [_chat_message_row_to_dict(r) for r in rows]
+
+
+def list_recent_chat_messages(conv_id: str, limit: int) -> list[dict]:
+    """某段对话最近 limit 条，**按 id 升序**返回（供 ThreadStore 回填路由上下文）。
+
+    先倒序 LIMIT 取最近 N 条，再正序返回——路由上下文的时序不能反。
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE conv_id = ? ORDER BY id DESC LIMIT ?",
+            (conv_id, limit),
+        ).fetchall()
+    return [_chat_message_row_to_dict(r) for r in reversed(rows)]
+
+
+def count_chat_messages(conv_id: str) -> int:
+    """某段对话的消息条数（删除对话时记日志用）。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM chat_messages WHERE conv_id = ?", (conv_id,)
+        ).fetchone()
+    return int(row["n"])
+
+
+def delete_conversation(conv_id: str) -> None:
+    """删对话及其全部消息。**不触碰 images**（Spec17 §2.1：删对话不删作品）。"""
+    with _connect() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE conv_id = ?", (conv_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+        conn.commit()
+
+
+# ---------- 帖子评论（Spec17 §5.1d / §5.1g） ----------
+
+def create_comment(post_id: int, user_id: int, text: str) -> dict:
+    """写一条评论，返回带 author / author_is_admin 的记录 dict。"""
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO post_comments (post_id, user_id, text, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (post_id, user_id, text, _now_iso()),
+        )
+        conn.commit()
+        comment_id = cur.lastrowid
+    return get_comment(comment_id)
+
+
+def get_comment(comment_id: int) -> dict | None:
+    """按 id 取评论（含 author 字段）；不存在返回 None。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT c.*, u.username AS author, u.is_admin AS author_is_admin "
+            "FROM post_comments c JOIN users u ON u.id = c.user_id "
+            "WHERE c.id = ?",
+            (comment_id,),
+        ).fetchone()
+    return _post_comment_row_to_dict(row)
+
+
+def list_comments_for_posts(post_ids: list[int]) -> dict[int, list[dict]]:
+    """批量取多帖的评论，按 post_id 分组，组内 id 升序。
+
+    一次 JOIN users 查完（见 §5.1g），避免列表接口变成 N+1。post_ids 为空直接返回 {}。
+    """
+    if not post_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in post_ids)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT c.*, u.username AS author, u.is_admin AS author_is_admin "  # noqa: S608（占位符数量由入参长度生成）
+            "FROM post_comments c JOIN users u ON u.id = c.user_id "
+            f"WHERE c.post_id IN ({placeholders}) "
+            "ORDER BY c.id ASC",
+            tuple(post_ids),
+        ).fetchall()
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        record = _post_comment_row_to_dict(row)
+        grouped.setdefault(record["post_id"], []).append(record)
+    return grouped
+
+
+def delete_comment(comment_id: int) -> None:
+    """删一条评论。"""
+    with _connect() as conn:
+        conn.execute("DELETE FROM post_comments WHERE id = ?", (comment_id,))
+        conn.commit()

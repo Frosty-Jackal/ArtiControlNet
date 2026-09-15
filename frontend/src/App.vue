@@ -7,79 +7,84 @@
 
   <!-- 已登录 → 聊天页 / 管理视图 -->
   <div v-else class="app">
-    <header class="app-header">
-      <div class="brand">
-        <span class="brand-dot"></span>
-        <h1>ArtiControlNet</h1>
-      </div>
-      <span class="brand-sub">
-        赋能设计的 AIGC 系统 · {{ auth.username }}
-      </span>
-      <button class="btn-clear" @click="toggleGallery">
-        {{ showGallery ? '返回聊天' : '我的作品' }}
-      </button>
-      <button class="btn-clear" @click="toggleCommunity">
-        {{ showCommunity ? '返回聊天' : '社区' }}
-      </button>
-      <button class="btn-clear" @click="toggleSuggestions">
-        {{ showSuggestions ? '返回聊天' : '建议' }}
-      </button>
-      <button v-if="auth.isAdmin" class="btn-clear" @click="toggleAdmin">
-        {{ showAdmin ? '返回聊天' : '用户管理' }}
-      </button>
-      <button v-if="auth.isAdmin" class="btn-clear" @click="toggleStats">
-        {{ showStats ? '返回聊天' : '数据统计' }}
-      </button>
-      <button
-        v-if="!showAdmin && !showStats && !showGallery && !showCommunity && !showSuggestions"
-        class="btn-clear"
-        title="清空当前对话"
-        @click="onClear"
-      >
-        清空
-      </button>
-      <button class="btn-clear" title="使用帮助" @click="showHelp = !showHelp">帮助</button>
-      <button class="btn-logout" title="退出登录" @click="onLogout">退出</button>
-    </header>
+    <!-- Spec17 §7.5：对话历史侧边栏常驻在聊天视图左侧（其它面板视图下不渲染） -->
+    <ConversationSidebar
+      v-if="isChatView"
+      :conversations="store.conversations"
+      :current-id="store.currentConvId"
+      @new="onNewConversation"
+      @open="onOpenConversation"
+      @delete="onDeleteConversation"
+    />
 
-    <GalleryPanel v-if="showGallery" @close="showGallery = false" />
-    <AdminPanel v-else-if="showAdmin" @close="showAdmin = false" />
-    <StatsPanel v-else-if="showStats" @close="showStats = false" />
-    <CommunityPanel v-else-if="showCommunity" @close="showCommunity = false" />
-    <SuggestionPanel v-else-if="showSuggestions" @close="showSuggestions = false" />
-
-    <template v-else>
-      <main class="chat-scroll" ref="scrollRef">
-        <div v-if="store.messages.length === 0" class="empty-state">
-          <p class="empty-title">🎨 想要什么，直接说</p>
-          <p class="empty-hint">
-            “做一张新年海报” · “上传线稿让它上色” · “上传照片问它是什么”
-          </p>
+    <div class="main-col">
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <h1>ArtiControlNet</h1>
         </div>
-        <ChatBubble
-          v-for="m in store.messages"
-          :key="m.id"
-          :message="m"
-          @retry="onRetry"
-          @vote="store.toggleFeedback"
-        />
-        <TypingIndicator v-if="store.sending" />
-      </main>
+        <span class="brand-sub">
+          赋能设计的 AIGC 系统 · {{ auth.username }}
+        </span>
+        <button class="btn-clear" @click="toggleGallery">
+          {{ showGallery ? '返回聊天' : '我的作品' }}
+        </button>
+        <button class="btn-clear" @click="toggleCommunity">
+          {{ showCommunity ? '返回聊天' : '社区' }}
+        </button>
+        <button class="btn-clear" @click="toggleSuggestions">
+          {{ showSuggestions ? '返回聊天' : '建议' }}
+        </button>
+        <button v-if="auth.isAdmin" class="btn-clear" @click="toggleAdmin">
+          {{ showAdmin ? '返回聊天' : '用户管理' }}
+        </button>
+        <button v-if="auth.isAdmin" class="btn-clear" @click="toggleStats">
+          {{ showStats ? '返回聊天' : '数据统计' }}
+        </button>
+        <button class="btn-clear" title="使用帮助" @click="showHelp = !showHelp">帮助</button>
+        <button class="btn-logout" title="退出登录" @click="onLogout">退出</button>
+      </header>
 
-      <ChatInput :disabled="store.sending" @send="onSend" />
-    </template>
+      <GalleryPanel v-if="showGallery" @close="showGallery = false" />
+      <AdminPanel v-else-if="showAdmin" @close="showAdmin = false" />
+      <StatsPanel v-else-if="showStats" @close="showStats = false" />
+      <CommunityPanel v-else-if="showCommunity" @close="showCommunity = false" />
+      <SuggestionPanel v-else-if="showSuggestions" @close="showSuggestions = false" />
 
-    <!-- Spec8：帮助弹窗（顶层 overlay，任何视图都可用） -->
-    <HelpModal v-if="showHelp" @close="showHelp = false" />
+      <template v-else>
+        <main class="chat-scroll" ref="scrollRef">
+          <div v-if="store.messages.length === 0" class="empty-state">
+            <p class="empty-title">🎨 想要什么，直接说</p>
+            <p class="empty-hint">
+              “做一张新年海报” · “上传线稿让它上色” · “上传照片问它是什么”
+            </p>
+          </div>
+          <ChatBubble
+            v-for="m in store.messages"
+            :key="m.id"
+            :message="m"
+            @retry="onRetry"
+            @vote="store.toggleFeedback"
+          />
+          <TypingIndicator v-if="store.sending" />
+        </main>
+
+        <ChatInput :disabled="store.sending" @send="onSend" />
+      </template>
+
+      <!-- Spec8：帮助弹窗（顶层 overlay，任何视图都可用） -->
+      <HelpModal v-if="showHelp" @close="showHelp = false" />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useChatStore } from './store/chat'
 import { useAuthStore } from './store/auth'
 import ChatBubble from './components/ChatBubble.vue'
 import ChatInput from './components/ChatInput.vue'
+import ConversationSidebar from './components/ConversationSidebar.vue'
 import TypingIndicator from './components/TypingIndicator.vue'
 import Login from './views/Login.vue'
 import AdminPanel from './views/AdminPanel.vue'
@@ -157,6 +162,12 @@ function closeAllPanels() {
   showSuggestions.value = false
 }
 
+// Spec17 §7.5：只有聊天视图才挂对话侧边栏（五个面板互斥，任一打开即非聊天视图）
+const isChatView = computed(
+  () => !showGallery.value && !showAdmin.value && !showStats.value
+    && !showCommunity.value && !showSuggestions.value
+)
+
 // 撤销自身管理员 → 自动关闭管理视图（社区/建议对所有登录用户保留）
 watch(
   () => auth.isAdmin,
@@ -195,8 +206,18 @@ function onSend(payload) {
 function onRetry(errorId) {
   store.retry(errorId)
 }
-function onClear() {
-  store.clear()
+
+// 侧边栏三个动作：切换 / 删除之后都要滚到底（新载入的历史从最新一条看起）
+function onNewConversation() {
+  store.newConversation()
+  scrollToBottom()
+}
+async function onOpenConversation(id) {
+  await store.openConversation(id)
+  scrollToBottom()
+}
+async function onDeleteConversation(id) {
+  await store.deleteConversation(id)
   scrollToBottom()
 }
 </script>

@@ -49,6 +49,10 @@ SHARE_TTL_SECONDS = int(os.getenv("SHARE_TTL_SECONDS", "604800"))  # 分享链�
 COMMUNITY_POST_TEXT_MAX = 1000        # 社区帖子文字上限（前后端同值）
 SUGGESTION_TEXT_MAX = 2000            # 建议文字上限（前后端同值）
 
+# ===== 对话历史 / 评论（Spec17）=====
+COMMENT_TEXT_MAX = int(os.getenv("COMMENT_TEXT_MAX", "200"))                 # 单条评论字数上限
+CONVERSATION_LIST_LIMIT = int(os.getenv("CONVERSATION_LIST_LIMIT", "50"))    # 侧边栏对话列表上限（不分页）
+
 # ===== 个人作品风格 Wiki（Spec12）=====
 WIKI_STYLE_MAX = int(os.getenv("WIKI_STYLE_MAX", "2000"))               # 手编 / 生成的风格文本上限（字）
 WIKI_PROMPT_ITEM_MAX = int(os.getenv("WIKI_PROMPT_ITEM_MAX", "500"))    # 单条作品 prompt 提取上限（字）

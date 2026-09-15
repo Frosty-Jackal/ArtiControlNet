@@ -279,6 +279,7 @@ import {
   createShare, deleteGalleryItem, fetchGalleryFile, getWiki, listGallery,
   refreshWikiStyle, revokeShare, updateGalleryNote, updateWikiStyle, uploadGalleryImage
 } from '../api/chatApi'
+import { attachObjectUrls, releaseObjectUrl } from '../composables/useAuthedImage'
 import { useAuthStore } from '../store/auth'
 
 const emit = defineEmits(['close'])
@@ -304,7 +305,6 @@ const busyId = ref(null)
 const lightbox = ref(null)
 const promptOverlay = ref(null) // 全文 prompt 弹窗：当前展示的作品记录（Spec6 §5.3）
 const copied = ref(false)
-let objectUrls = [] // 统一回收，避免内存泄漏
 
 // ---- 上传作品 / 改备注弹窗（Spec16 §7.2g）----
 const uploadOpen = ref(false)
@@ -385,7 +385,7 @@ async function load() {
   try {
     const data = await listGallery(activeSource.value)
     items.value = data.items || []
-    await Promise.all(items.value.map((it) => loadThumb(it)))
+    await attachObjectUrls(items.value, (id) => fetchGalleryFile(id, false))
   } catch (e) {
     error.value = e.message || '加载作品失败'
   } finally {
@@ -394,18 +394,12 @@ async function load() {
 }
 
 async function loadThumb(item) {
-  try {
-    const resp = await fetchGalleryFile(item.id, false)
-    item.objectUrl = URL.createObjectURL(resp.data)
-    objectUrls.push(item.objectUrl)
-  } catch (e) {
-    item.objectUrl = null
-  }
+  await attachObjectUrls([item], (id) => fetchGalleryFile(id, false))
 }
 
+// 释放走共享缓存的引用计数（Spec17 §7.1）：同一张图在别处还挂着时不会被 revoke
 function releaseThumbs() {
-  objectUrls.forEach((u) => URL.revokeObjectURL(u))
-  objectUrls = []
+  items.value.forEach((it) => releaseObjectUrl(it))
 }
 
 function download(item) {
@@ -441,10 +435,7 @@ async function remove(item) {
     await deleteGalleryItem(item.id)
     const i = items.value.findIndex((x) => x.id === item.id)
     if (i !== -1) {
-      if (items.value[i].objectUrl) {
-        URL.revokeObjectURL(items.value[i].objectUrl)
-        objectUrls = objectUrls.filter((u) => u !== items.value[i].objectUrl)
-      }
+      releaseObjectUrl(items.value[i]) // 释放缓存引用后再摘掉卡片
       items.value.splice(i, 1)
     }
     if (lightbox.value && lightbox.value.id === item.id) lightbox.value = null

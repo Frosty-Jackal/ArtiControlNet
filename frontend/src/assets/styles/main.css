@@ -135,11 +135,20 @@ input, textarea {
 }
 
 .app {
+  /* Spec17 §7.5：改成 flex row —— 左侧对话历史侧边栏 + 右侧主列 */
   display: flex;
-  flex-direction: column;
   height: 100%;
   max-width: 900px;
   margin: 0 auto;
+}
+
+/* 主列：头部 + 面板 / 消息流 + 输入框。min-width:0 必须有，
+   否则聊天内容（长文本、图片）会把 flex 子项撑破，侧边栏被挤没。 */
+.main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-header {
@@ -987,4 +996,216 @@ select {
 option {
   background: var(--bg-input);
   color: var(--text-primary);
+}
+
+/* ================= 对话历史侧边栏（Spec17 §7.4 / §7.8） =================
+   聊天视图左侧常驻，只此一处使用；样式按 §7.8 约定放在主样式表里，
+   与 .app / .main-col 的 flex row 布局同处一节。 */
+
+.conv-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.conv-sidebar-top {
+  padding: 16px 12px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.conv-sidebar-new {
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--purple-600);
+  border: 1px solid var(--purple-600);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), opacity var(--transition-fast);
+}
+
+.conv-sidebar-new:hover:not(:disabled) {
+  background: var(--user-bubble-hover);
+  border-color: var(--user-bubble-hover);
+}
+
+/* currentConvId === null：已经在空对话里了，再点没有意义 */
+.conv-sidebar-new:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.conv-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.conv-empty {
+  padding: 20px 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.conv-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.conv-item:hover {
+  background: var(--bg-surface-hover);
+}
+
+/* 当前对话：浅紫底 + 左侧 3px 紫色标记 */
+.conv-item.active {
+  background: var(--bg-surface);
+  border-left-color: var(--purple-600);
+}
+
+.conv-item-main {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 4px 8px 9px;
+  text-align: left;
+  background: transparent;
+  border: none;
+}
+
+/* 时间与「的对话」分两行（窄侧边栏里更好读） */
+.conv-item-time {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.conv-item-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.conv-item.active .conv-item-time {
+  color: var(--text-primary);
+}
+
+.conv-item-del {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+}
+
+.conv-item:hover .conv-item-del {
+  opacity: 1;
+}
+
+.conv-item-del:hover {
+  color: #fca5a5;
+}
+
+/* ================= Spec17：聊天图片缺失占位 =================
+   消息引用的作品库图片被用户在「我的作品」里删掉后（§3.4 悬挂引用），
+   渲染这个占位框而不是裂图；不可点开大图。 */
+
+.bubble-img-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 160px;
+  min-height: 120px;
+  max-width: 100%;
+  padding: 24px 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px dashed var(--border-light);
+  border-radius: var(--radius-md);
+}
+
+/* ================= Spec17：帖子评论区（内联滚动区）================= */
+
+.post-comments {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 4px 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.comment-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.comment-author {
+  color: var(--purple-600);
+  font-weight: 600;
+}
+
+/* 评论密集：两行截断，鼠标悬停看全文（title） */
+.comment-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-all;
+}
+
+.comment-time {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.comment-empty {
+  padding: 10px 2px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.comment-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.comment-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Spec17 §7.8：窄屏隐藏侧边栏（不实现移动端抽屉，历史对话在窄屏下不可访问） */
+@media (max-width: 768px) {
+  .conv-sidebar {
+    display: none;
+  }
 }

@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import auth
+import chat_history
 import community
 import config
 import db
@@ -28,10 +29,11 @@ import shares
 import wiki
 from agents.supervisor import run_supervisor
 from errors import (AppError, AuthTokenError, BadRequestError,
-                    CredentialsFormatError, FeedbackParamError, FileMissingError,
-                    ForbiddenError, LoginFailedError, LoginRateLimitedError,
-                    NotFoundError, PostContentError, PostNotFoundError,
-                    ShareNotFoundError, SuggestionContentError,
+                    CommentContentError, CredentialsFormatError,
+                    FeedbackParamError, FileMissingError, ForbiddenError,
+                    GalleryItemNotFoundError, LoginFailedError,
+                    LoginRateLimitedError, NotFoundError, PostContentError,
+                    PostNotFoundError, ShareNotFoundError, SuggestionContentError,
                     SuggestionNotFoundError, UnsupportedImageTypeError,
                     UserNotFoundError)
 from logging_setup import configure_logging
@@ -92,6 +94,28 @@ class ThreadStore:
             q = self._threads.get(thread_id)
             return list(q) if q else []
 
+    async def ensure_loaded(self, thread_id: str, user_id: int) -> None:
+        """内存 miss 时从 chat_messages 回填最近 N 条（Spec17 §5.2B）。
+
+        对话持久化后，后端重启 / 换进程之后点历史对话"接着聊"不能失忆——
+        原来只活在内存里的路由上下文必须能从库里重建。
+
+        `user_id` 目前不参与查询（调用方已在路由层做过归属校验），保留形参是为了
+        让这一个入口自带"是谁的对话"这一信息，将来若要把回填收窄到本人也能就地加。
+
+        双检锁：慢路径（查库）在锁外，两把锁之间的间隙由第二次 `in` 判断兜住，
+        并发两次请求同一段对话只会灌一次。
+        """
+        async with self._lock:
+            if thread_id in self._threads:
+                return
+        entries = chat_history.load_recent_entries(thread_id, self._limit)
+        if not entries:
+            return
+        async with self._lock:
+            if thread_id not in self._threads:
+                self._threads[thread_id] = deque(entries, maxlen=self._limit)
+
 
 # ---------- 挂起意图（Spec5 §5.5，内存，按 thread_id）----------
 
@@ -131,6 +155,24 @@ class PendingStore:
 # ---------- Worker 处理器 ----------
 
 def _make_handler(store: ThreadStore, pending_store: PendingStore):
+    def persist_reply(task: Task, result: dict) -> None:
+        """把成功结果落库为一条助手消息（Spec17 §5.2C）。
+
+        落库只是"记录"，不是任务的一部分：它自己出错不能让一个已经成功、
+        结果也已经交付给用户的任务翻成 FAILED（与 §5.2C 对 `image_ids` 空值的
+        兜底同一个立场）。失败/超时/排队被拒的结果不走这里——那类结果不落库（§3.4）。
+        """
+        user_id = task.request.get("user_id")
+        if user_id is None:
+            return
+        try:
+            chat_history.record_assistant_reply(task.thread_id, user_id, result, task.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("助手消息落库失败", extra={
+                "event": "chat.persist_failed", "thread_id": task.thread_id,
+                "task_id": task.id,
+            })
+
     async def handle_task(task: Task) -> dict:
         request = task.request
         try:
@@ -169,6 +211,7 @@ def _make_handler(store: ThreadStore, pending_store: PendingStore):
             await store.append(task.thread_id, {
                 "role": "assistant", "text": question,
             })
+            persist_reply(task, result)      # 追问也是助手说过的话，历史里要看得到
             logger.info("发起追问", extra={
                 "event": "clarify.asked", "thread_id": task.thread_id,
                 "intent": intent,
@@ -193,6 +236,7 @@ def _make_handler(store: ThreadStore, pending_store: PendingStore):
                 "role": "assistant", "text": "（已生成图片）",
                 "images": result.get("images") or [],
             })
+        persist_reply(task, result)          # 内存上下文 + 持久化各记一份（§5.2C）
         # 成功路径：按工具标签累计使用统计（Spec4 §5.2）；失败/超时/排队被拒不计
         category = _usage_category(result)
         if category:
@@ -349,31 +393,106 @@ async def healthz():
 @app.post("/api/chat")
 async def create_chat(payload: schemas.ChatRequest, request: Request,
                       x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """发起一轮对话：解析对话 → 校验参考图 → 回填路由上下文 → 用户消息落库 → 入队。
+
+    步骤顺序是契约的一部分（Spec17 §5.2B）：第 3 步的回填**必须**早于第 4 步的
+    落库，否则刚写进库的这条用户消息会被回填进内存上下文，第 6 步再 append 一次，
+    同一句话在路由上下文里出现两遍。
+    """
     request_id = _request_id(x_request_id)
-    thread_id = payload.thread_id or f"t_{uuid.uuid4().hex[:8]}"
+    user = request.state.user
     queue: TaskQueue = request.app.state.queue
     store: ThreadStore = request.app.state.thread_store
 
+    # 1. 对话 id：复用则必须是本人的（Spec17 §6.2 语义收紧，原先接受任意字符串）
+    if payload.thread_id:
+        chat_history.require_owned(payload.thread_id, user["id"])
+        thread_id = payload.thread_id
+        is_new_conversation = False
+    else:
+        thread_id = f"t_{uuid.uuid4().hex[:8]}"    # 新 id，此时还不落库
+        is_new_conversation = True
+
+    # 2. 参考图归属校验：image_id 优先，越权 / 不存在 → 40403
+    image_id = payload.image_id
+    if image_id is not None:
+        record = db.get_image_record(image_id)
+        if record is None or record["user_id"] != user["id"]:
+            raise GalleryItemNotFoundError()
+        # 路由上下文与后续会话都引用作品库（§5.2A）。只传 image_url 的调用方走回退分支，
+        # 该轮结束时 chat_messages.image_id 为 NULL——前端 Spec17 起一律传 image_id。
+        image_ref = f"/api/gallery/{image_id}/file"
+    else:
+        image_ref = payload.image_url
+
+    # 3. 内存 miss 时从库回填路由上下文（后端重启后"接着聊"不失忆）
+    await store.ensure_loaded(thread_id, user["id"])
+
+    # 4. 用户消息落库：conversations 行在这一步才真正创建（"消息驱动"，§5.3）
+    chat_history.start_turn(thread_id, user["id"], text=payload.message,
+                            image_id=image_id)
+    if is_new_conversation:
+        logger.info("新对话", extra={
+            "event": "chat.conversation_started", "request_id": request_id,
+            "thread_id": thread_id, "user_id": user["id"],
+        })
+
+    # 5. 提交任务（失败/超时/排队被拒都不会撤掉上面那条用户消息，§3.4）
     task = await queue.submit(
         thread_id=thread_id, kind="chat", request_id=request_id,
         request={
             "message": payload.message,
-            "image_url": payload.image_url,
+            "image_url": image_ref,
             "thread_id": thread_id,
             "public_base": _public_base(request),
             "request_id": request_id,
-            "user_id": request.state.user["id"],   # 统计归属（Spec4 §5.2）
+            "user_id": user["id"],   # 统计归属（Spec4 §5.2）+ 消息落库归属（Spec17）
         },
     )
-    # 记录用户消息（供后续路由上下文）
+    # 6. 记录用户消息（供后续路由上下文）
     await store.append(thread_id, {
-        "role": "user", "text": payload.message, "image_url": payload.image_url,
+        "role": "user", "text": payload.message, "image_url": image_ref,
     })
     logger.info("收到对话请求", extra={
         "event": "chat.submitted", "request_id": request_id,
         "thread_id": thread_id, "task_id": task.id,
     })
     return _ok({"task_id": task.id, "thread_id": thread_id, "status": task.status})
+
+
+# ---------- 对话历史（Spec17 §6.3~§6.5）----------
+
+@app.get("/api/conversations")
+async def list_conversations(request: Request):
+    """本人对话列表（updated_at 倒序，上限 CONVERSATION_LIST_LIMIT，不分页）。
+
+    只返回本人的（`WHERE user_id = ?`），无管理员视角——聊天记录是私域数据。
+    """
+    return _ok({"items": chat_history.list_conversations(request.state.user["id"])})
+
+
+@app.get("/api/conversations/{conv_id}/messages")
+async def get_conversation_messages(conv_id: str, request: Request):
+    """某段对话的全部消息（时间正序）。不存在 / 非本人 → 40407（不泄露存在性）。"""
+    return _ok(chat_history.get_conversation_messages(conv_id, request.state.user["id"]))
+
+
+@app.delete("/api/conversations/{conv_id}")
+async def delete_conversation(conv_id: str, request: Request,
+                              x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """删除本人的某段对话及其全部消息；**不删任何图片**（§6.5）。
+
+    重复删除返回 40407 而不是静默 200：前端只会拿到自己列表里的 id，触发即 bug。
+    """
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    result = chat_history.delete_conversation(conv_id, user["id"])
+    logger.info("删除对话", extra={
+        "event": "chat.conversation_deleted", "request_id": request_id,
+        "thread_id": conv_id, "user_id": user["id"],
+        "messages": result["message_count"],       # 正文不入日志（§10）
+    })
+    return _ok({"id": conv_id})
 
 
 @app.post("/api/images")
@@ -386,11 +505,14 @@ async def upload_image(request: Request, file: UploadFile = File(...),
     ext = media.validate_upload(data)                  # 40002 / 40003 / 40004
     url = media.save_upload(data, _public_base(request), ext)
     # 上传即入库：除临时 storage/ 外，额外持久化到个人作品库（Spec5 §5.2 链路 1）
-    gallery.save_gallery_image(data, request.state.user["id"], "upload", None)
+    # Spec17 §6.1：返回值不再丢弃——前端要把 image_id 带进 /api/chat，让这一轮
+    # 的参考图落库为作品库引用，而不是活 1 小时的 storage/ 地址。
+    record = gallery.save_gallery_image(data, request.state.user["id"], "upload", None)
     logger.info(f"图片上传成功: {url}", extra={
         "event": "image.uploaded", "request_id": request_id,
+        "image_id": record["id"],
     })
-    return _ok({"image_url": url})
+    return _ok({"image_url": url, "image_id": record["id"]})
 
 
 @app.get("/api/tasks/{task_id}")
@@ -409,10 +531,9 @@ async def get_task(task_id: int, request: Request):
     })
 
 
-@app.get("/api/threads/{thread_id}/messages")
-async def get_thread_messages(thread_id: str, request: Request):
-    store: ThreadStore = request.app.state.thread_store
-    return _ok({"messages": await store.get(thread_id)})
+# Spec17 §6.6：`GET /api/threads/{thread_id}/messages` 已删除——它是死代码（前端从未调用，
+# 历史改由 `GET /api/conversations/{id}/messages` 提供），且没有归属校验（任何人凭
+# thread_id 就能读到别人的对话）。`ThreadStore` 本身保留：它是路由上下文，不是接口。
 
 
 # ---------- 个人作品库（Spec5 §6.1）----------
@@ -541,7 +662,11 @@ async def create_community_post(request: Request,
                                 gallery_id: Optional[int] = Form(None),
                                 file: Optional[UploadFile] = File(None),
                                 x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
-    """发帖：单图（作品库选择 gallery_id 或新上传 file）+ 文字（1~1000 字）。"""
+    """发帖：文字（1~1000 字）+ **可选**单图（作品库 gallery_id 或新上传 file）。
+
+    Spec17 §5.2D：图片来源从"必须二选一"改为「不能同时给，但可以都不给」——
+    两者皆无即纯文字帖。多图仍不在范围内。
+    """
     request_id = _request_id(x_request_id)
     user = request.state.user
     body = (text or "").strip()
@@ -549,8 +674,8 @@ async def create_community_post(request: Request,
         raise PostContentError(f"帖子文字需为 1~{config.COMMUNITY_POST_TEXT_MAX} 字")
     has_gallery = gallery_id is not None
     has_file = file is not None and file.filename
-    if has_gallery == has_file:
-        raise PostContentError("图片来源需二选一：从作品库选择或上传新图")
+    if has_gallery and has_file:
+        raise PostContentError("图片来源最多一张：从作品库选择或上传新图，不能同时给")
     image_bytes = None
     ext = None
     if has_file:
@@ -562,27 +687,82 @@ async def create_community_post(request: Request,
     logger.info("发帖", extra={
         "event": "community.posted", "request_id": request_id,
         "user_id": user["id"], "post_id": post["id"],
+        "has_image": bool(post["image_file"]),
     })
     return _ok({"post": {
         "id": post["id"],
         "text": post["text"],
         "author": user["username"],
         "author_is_admin": user["is_admin"],
-        "image_url": f"/api/community/{post['id']}/image",
+        "image_url": (f"/api/community/{post['id']}/image"
+                      if post["image_file"] else None),
         "like_count": 0,
         "dislike_count": 0,
         "my_vote": None,
+        "comments": [],                            # 新帖必然无评论（§6.7）
         "created_at": post["created_at"],
     }})
 
 
 @app.get("/api/community")
 async def list_community(request: Request, offset: int = 0, limit: int = 50):
-    """帖子列表，最新在前；每项含作者、计数、我的投票。limit≤100。"""
+    """帖子列表，最新在前；每项含作者、计数、我的投票、**全量内嵌评论**。
+
+    limit≤100；评论不参与分页（§6.8）——前端零额外请求，一条 GET 拿全。
+    """
     user = request.state.user
     offset = max(0, offset)
     limit = max(1, min(limit, 100))
     return _ok({"items": community.list_posts(user["id"], offset, limit)})
+
+
+# ---------- 帖子评论（Spec17 §6.10）----------
+#
+# 有意**没有 PUT**：评论不可编辑（§2.3），要改只能删了重发。全仓唯一如此。
+
+@app.post("/api/community/{post_id}/comments")
+async def create_comment(post_id: int, payload: schemas.CommentCreateRequest,
+                         request: Request,
+                         x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """发表评论（1~COMMENT_TEXT_MAX 字）。帖子不存在 → 40404；文字非法 → 40016。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    body = (payload.text or "").strip()
+    if not body or len(body) > config.COMMENT_TEXT_MAX:
+        raise CommentContentError(f"评论需为 1~{config.COMMENT_TEXT_MAX} 字")
+    comment = community.create_comment(post_id, user["id"], body)
+    logger.info("发表评论", extra={
+        "event": "community.commented", "request_id": request_id,
+        "user_id": user["id"], "post_id": post_id, "comment_id": comment["id"],
+        # 评论正文不入日志（§10）：用户私人文字只记 id
+    })
+    return _ok({"comment": comment})
+
+
+@app.get("/api/community/{post_id}/comments")
+async def list_comments(post_id: int, request: Request):
+    """某帖的全部评论（id ASC，时间正序）；帖子不存在 → 40404。
+
+    前端不调用它——评论已随 `GET /api/community` 内嵌返回（§6.8）。保留是因为
+    POST/DELETE 挂在 `/comments` 下而缺 GET 会让资源形态残缺，也没法用 curl
+    单独验证某帖的评论。
+    """
+    return _ok({"items": community.list_comments(post_id)})
+
+
+@app.delete("/api/community/{post_id}/comments/{comment_id}")
+async def delete_comment(post_id: int, comment_id: int, request: Request,
+                         x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """删评论（评论作者或管理员）。评论不存在 / 不挂在该帖上 → 40408；越权 → 40303。"""
+    request_id = _request_id(x_request_id)
+    user = request.state.user
+    result = community.delete_comment(post_id, comment_id, user["id"], user["is_admin"])
+    logger.info("删除评论", extra={
+        "event": "community.comment_deleted", "request_id": request_id,
+        "post_id": post_id, "comment_id": comment_id,
+        "actor_id": user["id"], "by_admin": result["by_admin"],
+    })
+    return _ok({"id": comment_id})
 
 
 @app.get("/api/community/{post_id}/image")

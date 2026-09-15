@@ -30,13 +30,21 @@ http.interceptors.request.use((config) => {
   return config
 })
 
+// 错误一律包成 Error，并把 HTTP 状态码挂到 err.status 上：
+// 渲染站内图片要区分「404 图片已删除」（Spec17 §3.4，渲染占位框）与其它错误（可重试）。
+function httpError(message, status) {
+  const e = new Error(message)
+  e.status = status
+  return e
+}
+
 http.interceptors.response.use(
   (resp) => {
     // 二进制响应（blob，画廊文件）直接放行，不按 JSON {code} 契约校验
     if (resp.config.responseType === 'blob') return resp
     const body = resp.data
     if (body && body.code !== 200) {
-      return Promise.reject(new Error(body.message || '请求失败'))
+      return Promise.reject(httpError(body.message || '请求失败', resp.status))
     }
     return resp
   },
@@ -52,7 +60,7 @@ http.interceptors.response.use(
           clearToken()
           window.dispatchEvent(new Event('artcn:unauthorized'))
         }
-        return Promise.reject(new Error(msg))
+        return Promise.reject(httpError(msg, resp.status))
       })
     }
     const body = resp?.data
@@ -62,21 +70,23 @@ http.interceptors.response.use(
       window.dispatchEvent(new Event('artcn:unauthorized'))
     }
     const msg = (body && body.message) || err.message || '网络错误'
-    return Promise.reject(new Error(msg))
+    return Promise.reject(httpError(msg, resp?.status))
   }
 )
 
+// 上传图片：返回 { imageUrl, imageId }（Spec17 §5.2A：对话消息按 image_id 引用作品库）
 export async function uploadImage(file) {
   const form = new FormData()
   form.append('file', file)
   const { data } = await http.post('/api/images', form)
-  return data.data.image_url
+  return { imageUrl: data.data.image_url, imageId: data.data.image_id }
 }
 
-export async function sendChat({ message, imageUrl, threadId }) {
+export async function sendChat({ message, imageUrl, imageId, threadId }) {
   const { data } = await http.post('/api/chat', {
     message,
     image_url: imageUrl || null,
+    image_id: imageId ?? null,
     thread_id: threadId || null
   })
   return data.data // { task_id, thread_id, status }
@@ -87,9 +97,21 @@ export async function getTask(taskId) {
   return data.data // { task_id, thread_id, status, kind, error, result }
 }
 
-export async function getThread(threadId) {
-  const { data } = await http.get(`/api/threads/${threadId}/messages`)
-  return data.data // { messages: [...] }
+// ---- 对话历史（Spec17 §6.2）----
+
+export async function listConversations() {
+  const { data } = await http.get('/api/conversations')
+  return data.data // { items: [{ id, created_at, updated_at }] }，updated_at 倒序
+}
+
+export async function getConversation(convId) {
+  const { data } = await http.get(`/api/conversations/${convId}/messages`)
+  return data.data // { conversation: {id,created_at,updated_at}, messages: [...] }
+}
+
+export async function deleteConversation(convId) {
+  const { data } = await http.delete(`/api/conversations/${convId}`)
+  return data.data // { id, message_count }
 }
 
 // ---- 认证 / 用户管理（Spec2 §6.1）----
@@ -194,7 +216,8 @@ export async function updateWikiStyle(style) {
 
 // ---- 社区（Spec9 §6.1）----
 
-// multipart：text 必填；图片来源二选一 gallery_id（作品库）或 file（新上传）
+// multipart：text 必填；图片**可选**（Spec17 §5.2D）——gallery_id（作品库）或
+// file（新上传）最多给一个，都不给即纯文字帖；两个都给由后端拦（40011）
 export async function createCommunityPost({ text, galleryId = null, file = null }) {
   const form = new FormData()
   form.append('text', text)
@@ -206,7 +229,7 @@ export async function createCommunityPost({ text, galleryId = null, file = null 
 
 export async function listCommunity(offset = 0, limit = 50) {
   const { data } = await http.get('/api/community', { params: { offset, limit } })
-  return data.data // { items: [...] }
+  return data.data // { items: [...] }，每条带内嵌 comments: [...]（Spec17 §5.2E）
 }
 
 // 返回 axios 响应：data 为 Blob。帖子图片同画廊需带 token 拉 blob → objectURL 渲染
@@ -221,6 +244,20 @@ export async function votePost(postId, vote) {
 
 export async function deletePost(postId) {
   const { data } = await http.delete(`/api/community/${postId}`)
+  return data.data // { id }
+}
+
+// ---- 帖子评论（Spec17 §6.10）----
+
+// 评论文本长度由后端校验（COMMENT_TEXT_MAX，40016）；前端已用 maxlength 硬截断。
+// 不发 listComments(postId)：评论随 GET /api/community 内嵌返回，前端没有单独拉取的时机（§7.2）。
+export async function createComment(postId, text) {
+  const { data } = await http.post(`/api/community/${postId}/comments`, { text })
+  return data.data.comment // 与列表内嵌的评论同形，可直接 push
+}
+
+export async function deleteComment(postId, commentId) {
+  const { data } = await http.delete(`/api/community/${postId}/comments/${commentId}`)
   return data.data // { id }
 }
 

@@ -1,5 +1,5 @@
 """Pydantic 请求/响应模型（接口契约见 Spec §8）。"""
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -8,8 +8,10 @@ class ChatRequest(BaseModel):
     """POST /api/chat 请求体。"""
 
     message: str = Field(..., min_length=1, max_length=8000, description="用户消息")
-    image_url: Optional[str] = Field(None, description="参考图地址（本站 /images/ 或绝对 URL）")
-    thread_id: Optional[str] = Field(None, description="会话 ID，复用则续接上下文")
+    image_url: Optional[str] = Field(None, description="参考图地址（本站路径或绝对 URL）")
+    image_id: Optional[int] = Field(
+        None, description="作品库图片 id（Spec17 §6.2；优先于 image_url）")
+    thread_id: Optional[str] = Field(None, description="对话 id；复用则续接上下文")
 
 
 class ChatOut(BaseModel):
@@ -21,9 +23,10 @@ class ChatOut(BaseModel):
 
 
 class UploadOut(BaseModel):
-    """POST /api/images 返回。"""
+    """POST /api/images 返回。image_id 为作品库记录 id（Spec17 §6.1）。"""
 
     image_url: str
+    image_id: int
 
 
 class TaskResult(BaseModel):
@@ -50,15 +53,9 @@ class TaskOut(BaseModel):
     result: Optional[TaskResult] = None
 
 
-class ThreadMessage(BaseModel):
-    """GET /api/threads/{thread_id}/messages 中的单条消息。"""
-
-    role: str                      # user | assistant
-    content: Any
-
-
-class ThreadOut(BaseModel):
-    messages: list[ThreadMessage]
+# Spec17 §6.6：`ThreadMessage` / `ThreadOut` 随 `GET /api/threads/{thread_id}/messages`
+# 一并删除——该路由从未被前端调用，历史消息现在由 `GET /api/conversations/{id}/messages`
+# 返回（chat_messages 行的原样形态，不再需要单独的响应模型）。
 
 
 # ---- 认证 / 用户管理（Spec2 §6）----
@@ -143,3 +140,11 @@ class GalleryNoteUpdateRequest(BaseModel):
     """PUT /api/gallery/{item_id}/note 请求体。长度校验在业务层（40015）。"""
 
     note: str
+
+
+# ---- 帖子评论（Spec17 §6.10）----
+
+class CommentCreateRequest(BaseModel):
+    """POST /api/community/{post_id}/comments 请求体。长度校验在路由层（40016）。"""
+
+    text: str

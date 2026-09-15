@@ -185,6 +185,36 @@ class SuggestionNotFoundError(NotFoundError):
         super().__init__(message, code=40406)
 
 
+# ---- 对话历史 / 评论（Spec17 §9，追加到 Spec16 §9 之后）----
+
+class ConversationNotFoundError(NotFoundError):
+    """对话不存在或不属于当前用户（不泄露存在性；越权与不存在同码）。"""
+
+    def __init__(self, message="对话不存在或不属于当前用户"):
+        super().__init__(message, code=40407)
+
+
+class CommentContentError(BadRequestError):
+    """评论内容非法（strip 后为空或超过 COMMENT_TEXT_MAX）。"""
+
+    def __init__(self, message="评论内容非法"):
+        super().__init__(message, code=40016)
+
+
+class CommentForbiddenError(AppError):
+    """无权删除该评论（非作者且非管理员）。"""
+
+    def __init__(self, message="无权删除该评论"):
+        super().__init__(40303, message, status_code=403)
+
+
+class CommentNotFoundError(NotFoundError):
+    """评论不存在，或不属于路径里的那个帖子（`post_id` / `comment_id` 错配）。"""
+
+    def __init__(self, message="评论不存在"):
+        super().__init__(message, code=40408)
+
+
 class InternalError(AppError):
     def __init__(self, message="内部错误"):
         super().__init__(50001, message, status_code=500)

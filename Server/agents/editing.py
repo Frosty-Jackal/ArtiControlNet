@@ -71,6 +71,8 @@ async def run(args: dict) -> dict:
     result = await edit(send_prompt, image_bytes, size or "")
     url = save_image(result, public_base=args.get("public_base", ""))
     user_id = args.get("user_id")
+    image_ids: list[int] = []
     if user_id is not None:
-        gallery.save_gallery_image(result, user_id, "edit", prompt)
-    return {"kind": "images", "images": [url]}
+        record = gallery.save_gallery_image(result, user_id, "edit", prompt)
+        image_ids.append(record["id"])          # Spec17 §5.2A：供对话落库引用作品库
+    return {"kind": "images", "images": [url], "image_ids": image_ids}
