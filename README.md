@@ -5,7 +5,6 @@
 <h1 align="center">ArtiControlNet</h1>
 
 <p align="center">
-  <b>线稿画完，上色能拖三天。</b><br>
   线稿上色 · 平面设计 · 绘画参考 · 传图分析 · 服装设计 ... 说句话就行。
 </p>
 
@@ -20,10 +19,14 @@
   <a href="mailto:frostyj@qq.com?subject=%E6%88%91%E6%83%B3%E8%AF%95%E7%94%A8%20ArtiControlNet">
     <img src="./GithubPage/assets/btn-buy.png" width="320" alt="购买 ArtiControlNet">
   </a>
+  <br><br>
+  <a href="https://github.com/Frosty-Jackal/ArtiControlNet">
+    <img src="./GithubPage/assets/btn-star.png" width="160" alt="给 ArtiControlNet 点个 Star">
+  </a>
 </p>
 
 <p align="center">
-  发邮件到 <b>frostyj@qq.com</b>，说一句「想试用」<br>
+  如果想试用/购买 ArtiControlNet，请发邮件到 <b>frostyj@qq.com</b>，说一句「想试用」<br>
   GitHub 来的宝子走专属通道，我开好账号发你，打开链接登录即用
 </p>
 
