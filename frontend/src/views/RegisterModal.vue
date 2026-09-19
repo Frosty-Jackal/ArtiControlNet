@@ -5,52 +5,59 @@
 
       <!-- Spec23 §7.1：结果屏整个删掉。注册成功 = 已经登录进系统了，
            弹窗随后被父级的 v-if 卸掉，没有"让你看清提示再自己关"这一步。 -->
-      <template>
-        <h2 class="reg-title">新用户注册</h2>
+      <!-- ⚠️ 表单**不要**再套一层 <template>（Spec23 的实现陷阱）。
+           Spec23 §7.1 的原 diff 是「<template v-if="done">…结果屏…</template>」+
+           「<template v-else>…表单…</template>」——删掉结果屏之后，剩下的是一个
+           **光杆 <template>**。Vue 只把带 v-if / v-for / v-slot 的 <template>
+           编译成 Fragment（子节点就地展开、正常渲染）；光杆的那个会被编译成
+           **一个真的 <template> DOM 元素**（createElementVNode("template", …)），
+           而浏览器 UA 样式表里写着 `template { display: none }`——整张表单当场
+           消失，只剩右上角的 × 与 padding，看起来就是"一条空横条"。
+           表单直接平铺在 .reg-card 里即可，这层包裹没有存在理由。 -->
+      <h2 class="reg-title">新用户注册</h2>
 
-        <form class="reg-form" @submit.prevent="submit">
-          <label class="reg-label">账号 <b class="reg-star">*</b></label>
-          <input v-model="username" class="login-input" placeholder="2~32 个字符" autocomplete="off" />
+      <form class="reg-form" @submit.prevent="submit">
+        <label class="reg-label">账号 <b class="reg-star">*</b></label>
+        <input v-model="username" class="login-input" placeholder="2~32 个字符" autocomplete="off" />
 
-          <label class="reg-label">密码 <b class="reg-star">*</b></label>
-          <!-- Spec22 §2.10：placeholder 跟着后端的常量走（6 → 2）。仍然**不做**代码校验：
-               长度规则只有一份中文 message，在后端。 -->
-          <input v-model="password" type="password" class="login-input"
-                 placeholder="至少 2 位" autocomplete="new-password" />
+        <label class="reg-label">密码 <b class="reg-star">*</b></label>
+        <!-- Spec22 §2.10：placeholder 跟着后端的常量走（6 → 2）。仍然**不做**代码校验：
+             长度规则只有一份中文 message，在后端。 -->
+        <input v-model="password" type="password" class="login-input"
+               placeholder="至少 2 位" autocomplete="new-password" />
 
-          <!-- Spec22 新增：二次确认。**纯前端**——后端收不到第二个框（§2.10），
-               所以这个校验**必须**在前端，而且它不进 schemas、不进后端。 -->
-          <label class="reg-label">确认密码 <b class="reg-star">*</b></label>
-          <input v-model="confirmPassword" type="password" class="login-input"
-                 placeholder="再输入一次" autocomplete="new-password" />
+        <!-- Spec22 新增：二次确认。**纯前端**——后端收不到第二个框（§2.10），
+             所以这个校验**必须**在前端，而且它不进 schemas、不进后端。 -->
+        <label class="reg-label">确认密码 <b class="reg-star">*</b></label>
+        <input v-model="confirmPassword" type="password" class="login-input"
+               placeholder="再输入一次" autocomplete="new-password" />
 
-          <!-- Spec22：联系方式整段改掉 —— 删掉手机号输入框与那句"至少填一项"的 reg-hint -->
-          <label class="reg-label">邮箱 <b class="reg-star">*</b></label>
-          <p class="reg-hint">注册需要邮箱验证，验证码会发到这个邮箱</p>
-          <div class="reg-code-row">
-            <input v-model="email" class="login-input" type="email"
-                   placeholder="邮箱" autocomplete="off" autocapitalize="off" />
-            <button type="button" class="btn-code" :disabled="codeCooldown > 0 || sendingCode"
-                    @click="sendCode">
-              {{ codeCooldown > 0 ? `${codeCooldown}s` : (sendingCode ? '发送中…' : '获取验证码') }}
-            </button>
-          </div>
-          <input v-model="code" class="login-input" type="text" inputmode="numeric" maxlength="4"
-                 placeholder="4 位验证码" autocomplete="off" />
-
-          <!-- Spec23 §7.1 删除：预充值提示 + 收款码（.reg-pay 那一块）。
-               注册不再要求先付钱——新用户自带免费试用额度，用完再自助充值。
-               ⚠️ .reg-pay / .reg-qr / .reg-pay-title 三条 CSS **保留**：
-               RechargeModal 还在用它们（§7.8）。 -->
-          <!-- Spec23 §7.1 删除：微信昵称那一组（标签 + 输入框）。
-               注册与对账从此刻起完全无关——微信昵称只对充值有效（§3.3-6）。 -->
-          <!-- Spec22 删除：<p class="reg-note">{{ config.daily_notice }}</p> ← 规则已不存在（§2.11） -->
-          <p v-if="error" class="login-error">{{ error }}</p>
-          <button class="btn-primary reg-submit" type="submit" :disabled="loading">
-            {{ loading ? '提交中…' : '提交申请' }}
+        <!-- Spec22：联系方式整段改掉 —— 删掉手机号输入框与那句"至少填一项"的 reg-hint -->
+        <label class="reg-label">邮箱 <b class="reg-star">*</b></label>
+        <p class="reg-hint">注册需要邮箱验证，验证码会发到这个邮箱</p>
+        <div class="reg-code-row">
+          <input v-model="email" class="login-input" type="email"
+                 placeholder="邮箱" autocomplete="off" autocapitalize="off" />
+          <button type="button" class="btn-code" :disabled="codeCooldown > 0 || sendingCode"
+                  @click="sendCode">
+            {{ codeCooldown > 0 ? `${codeCooldown}s` : (sendingCode ? '发送中…' : '获取验证码') }}
           </button>
-        </form>
-      </template>
+        </div>
+        <input v-model="code" class="login-input" type="text" inputmode="numeric" maxlength="4"
+               placeholder="4 位验证码" autocomplete="off" />
+
+        <!-- Spec23 §7.1 删除：预充值提示 + 收款码（.reg-pay 那一块）。
+             注册不再要求先付钱——新用户自带免费试用额度，用完再自助充值。
+             ⚠️ .reg-pay / .reg-qr / .reg-pay-title 三条 CSS **保留**：
+             RechargeModal 还在用它们（§7.8）。 -->
+        <!-- Spec23 §7.1 删除：微信昵称那一组（标签 + 输入框）。
+             注册与对账从此刻起完全无关——微信昵称只对充值有效（§3.3-6）。 -->
+        <!-- Spec22 删除：<p class="reg-note">{{ config.daily_notice }}</p> ← 规则已不存在（§2.11） -->
+        <p v-if="error" class="login-error">{{ error }}</p>
+        <button class="btn-primary reg-submit" type="submit" :disabled="loading">
+          {{ loading ? '提交中…' : '提交申请' }}
+        </button>
+      </form>
     </div>
   </div>
 </template>
