@@ -2,6 +2,10 @@
 <img src="./GithubPage/assets/hero-banner.jpg" width="100%" alt="ArtiControlNet —— 赋能设计的 AIGC 系统">
 </div>
 
+<p align="center">
+  <img src="./GithubPage/assets/logo.svg" width="130" alt="ArtiControlNet Logo">
+</p>
+
 <h1 align="center">ArtiControlNet</h1>
 
 <p align="center">
@@ -16,7 +20,14 @@
 </p>
 
 <p align="center">
-  <a href="mailto:frostyj@qq.com?subject=%E6%88%91%E6%83%B3%E8%AF%95%E7%94%A8%20ArtiControlNet">
+  <!-- Spec19：官方网址横条 → 官网首页；比下面的购买按钮更宽更醒目 -->
+  <a href="http://ArtiControlNet.fun">
+    <img src="./GithubPage/assets/site-banner.svg" width="680" alt="官方网址 ArtiControlNet.fun">
+  </a>
+  <br><br>
+  <!-- Spec19：改为直达官网注册页（登录页 ?register=1 会自动弹开注册窗）。
+       注意是 http 不是 https——站点没有证书，https 会先报证书错误再跳转，很难看。 -->
+  <a href="http://ArtiControlNet.fun/?register=1">
     <img src="./GithubPage/assets/btn-buy.png" width="320" alt="购买 ArtiControlNet">
   </a>
   <br><br>
@@ -26,8 +37,8 @@
 </p>
 
 <p align="center">
-  如果想试用/购买 ArtiControlNet，请发邮件到 <b>frostyj@qq.com</b>，说一句「想试用」<br>
-  GitHub 来的宝子走专属通道，我开好账号发你，打开链接登录即用
+  如果想试用 ArtiControlNet，请发邮件到 <b>frostyj@qq.com</b>，说一句「想试用」<br>
+  GitHub 来的宝子走专属通道，我开好账号发你，打开官方网址登录即用
 </p>
 
 <p align="center">
