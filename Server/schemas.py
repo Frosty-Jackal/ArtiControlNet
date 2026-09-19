@@ -158,3 +158,28 @@ class CommentCreateRequest(BaseModel):
     """POST /api/community/{post_id}/comments 请求体。长度校验在路由层（40016）。"""
 
     text: str
+
+
+# ---- 注册申请与审批（Spec19 §6.2 / §6.5）----
+
+class RegisterRequestCreate(BaseModel):
+    """POST /api/auth/register 请求体（Spec19 §6.2）。
+
+    全部字段都是裸 str：格式规则（长度、纯数字、@ 位置）一律在路由层判，
+    好让每一条都有自己的中文 message。Pydantic 只负责"字段在不在"。
+    """
+
+    username: str
+    password: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    wechat: str
+
+
+class RegisterApproveRequest(BaseModel):
+    """POST /api/admin/register-requests/{id}/approve 请求体（Spec19 §6.5）。
+
+    非整数由 Pydantic 拦下 → 40001；取值范围在路由层判 → 40017（复用 Spec18）。
+    """
+
+    quota_limit: int

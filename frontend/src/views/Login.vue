@@ -1,6 +1,9 @@
 <template>
   <div class="login-page">
     <div class="login-card">
+      <!-- Spec19 §7.1：品牌标识（透明底 SVG，深色卡片上直接成立）。
+           标识里只有图形与「ACN」三个字母，全称由下面的标题提供，两者互补。 -->
+      <img class="login-logo" :src="logoUrl" alt="ArtiControlNet" />
       <div class="login-brand">
         <span class="brand-dot"></span>
         <h1>ArtiControlNet</h1>
@@ -26,12 +29,26 @@
           {{ loading ? '登录中…' : '登 录' }}
         </button>
       </form>
+
+      <!-- Spec19 §7.2：注册入口（REGISTER_ENABLED=false 时整体不渲染按钮，客服行保留） -->
+      <div v-if="regCfg" class="login-register">
+        <button v-if="regCfg.enabled" type="button" class="btn-register" @click="showRegister = true">
+          新用户注册
+        </button>
+        <p class="login-service">有问题请致信官方客服：{{ regCfg.contact_email }}</p>
+      </div>
     </div>
+
+    <!-- Spec19 §7.3：注册申请弹窗 -->
+    <RegisterModal v-if="showRegister" :config="regCfg" @close="showRegister = false" />
   </div>
 </template>
 
 <script setup>
 import { onMounted, ref } from 'vue'
+import RegisterModal from './RegisterModal.vue'
+import { getRegisterConfig } from '../api/chatApi'
+import logoUrl from '../assets/logo.svg'
 import { useAuthStore } from '../store/auth'
 import { takeQuotaNotice } from '../utils/quotaNotice'
 
@@ -41,13 +58,33 @@ const password = ref('')
 const error = ref('')
 const loading = ref(false)
 
-// Spec18 §7.4：落地到登录页时，若有一条待显示的限额警告 → 红色提示行 + 弹窗。
-// 用户原话要求"弹出提示警告"，所以是 window.alert（而不是只写一行小字）。
-onMounted(() => {
+// Spec19 §7.2：注册弹窗的公开配置（取不到时为 null → 不画注册入口）
+const regCfg = ref(null)
+const showRegister = ref(false)
+
+onMounted(async () => {
+  // Spec18 §7.4：落地到登录页时，若有一条待显示的限额警告 → 红色提示行 + 弹窗。
+  // 用户原话要求"弹出提示警告"，所以是 window.alert（而不是只写一行小字）。
   const msg = takeQuotaNotice()
   if (msg) {
     error.value = msg
     window.alert(msg)
+  }
+
+  // Spec19 §7.2：静默降级——取不到就不画注册入口、不报错。
+  // 登录页的首要职责是登录，注册接口挂了不该让它连带报错。
+  try {
+    regCfg.value = await getRegisterConfig()
+  } catch {
+    regCfg.value = null
+  }
+  // Spec19 §7.4：?register=1 深链接 → 自动打开注册弹窗。
+  // **不清理 URL**：关掉弹窗后地址栏仍是 ?register=1，刷新会再次打开。
+  // 对 README 引流的场景这是期望行为（用户从官网链接进来，中途刷新，注册窗还在）。
+  // regCfg.enabled === false 时不打开（两层都拦，前端这层只是体验）。
+  if (new URLSearchParams(window.location.search).get('register') === '1'
+      && regCfg.value?.enabled) {
+    showRegister.value = true
   }
 })
 

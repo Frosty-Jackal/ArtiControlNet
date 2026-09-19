@@ -74,10 +74,37 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 AUTH_DB_PATH = BASE_DIR / "artcn.db"                  # 本地 SQLite 账号库（持久化，与 storage/ 无关）
 
+# ===== 注册申请与审批（Spec19）=====
+# 本段必须排在下面的 Spec18 限额块**之前**：QUOTA_CONTACT_EMAIL 的默认值取 SUPPORT_EMAIL，
+# 而 Python 是从上往下执行的（Spec19 §8「位置约束」）。
+#
+# 客服 / 管理员邮箱（**唯一来源**）。Spec18 的 QUOTA_CONTACT_EMAIL 默认跟随它，
+# 于是"超额提示里的邮箱"与"注册页客服邮箱"永远是同一个地址。
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "frostyj@qq.com").strip()
+
+# 注册申请开关：置 false 时 /api/auth/register 返回 40305，前端同时隐藏注册入口（Spec19 §3.3-7）。
+# 取值照抄"字符串转布尔"的宽松写法，只有明确的假值才算关。
+REGISTER_ENABLED = os.getenv("REGISTER_ENABLED", "true").strip().lower() not in (
+    "0", "false", "no", "off", "",
+)
+
+# 同一 IP 的申请冷却期（秒）。默认 86400 = 24 小时（Spec19 §2.2 的滚动窗口）。
+REGISTER_IP_WINDOW_SECONDS = int(os.getenv("REGISTER_IP_WINDOW_SECONDS", "86400"))
+
+# 收款码文件（**不进仓库**，见 .gitignore；部署时手动放到这个位置）。
+# 不是环境变量：它是一条路径，与 AUTH_DB_PATH 同类。
+PAYMENT_QR_PATH = BASE_DIR / "payment.jpg"
+
+# 两句给用户看的提示语（唯一来源，前端零副本——与 QUOTA_EXCEEDED_MESSAGE 同一原则）
+REGISTER_PRICE_NOTICE = "请先预充值，1 元起充，参考价格：1 元约 10 次设计服务"
+REGISTER_DAILY_NOTICE = (
+    f"每人每天只能申请一个账号，若操作失误或其他需求请联系在线客服 {SUPPORT_EMAIL}"
+)
+
 # ===== 服务限额（Spec18：API 服务调用计量与用户限额）=====
 QUOTA_DEFAULT_LIMIT = int(os.getenv("QUOTA_DEFAULT_LIMIT", "25"))    # 新建用户的默认限额（累计次数）
 QUOTA_LIMIT_MAX = int(os.getenv("QUOTA_LIMIT_MAX", "100000"))        # 管理员可设的限额上限（防误输入天文数字）
-QUOTA_CONTACT_EMAIL = os.getenv("QUOTA_CONTACT_EMAIL", "frostyj@qq.com").strip()
+QUOTA_CONTACT_EMAIL = os.getenv("QUOTA_CONTACT_EMAIL", SUPPORT_EMAIL).strip()
 # 超额提示语（唯一来源；前端只负责显示后端返回的 message，不做同值副本）
 QUOTA_EXCEEDED_MESSAGE = (
     f"您的服务次数已达上限，请联系管理员续费可继续使用！（管理员邮箱：{QUOTA_CONTACT_EMAIL}）"

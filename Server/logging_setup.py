@@ -24,7 +24,13 @@ class JsonFormatter(logging.Formatter):
                # Spec15 上传作品纳入风格事件字段
                "upload_analyzed", "upload_failed", "affected",
                # Spec18 服务限额事件字段（auth.quota_blocked / auth.admin.set_quota）
-               "used", "quota_limit", "path")
+               "used", "quota_limit", "path",
+               # Spec19 注册申请与审批事件字段。注意这里用 register_id 而不是
+               # Spec19 §10 表里写的 request_id：后者在本仓已经是"HTTP X-Request-Id"
+               # 的固定含义（每个路由的每行日志都带它），两者同名会让排查时
+               # 拿 request_id 一搜就串味。注册申请 id 一律叫 register_id。
+               "register_id", "has_phone", "has_email",
+               "decision", "was_status")
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(

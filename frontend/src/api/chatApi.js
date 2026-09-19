@@ -184,6 +184,49 @@ export async function deleteUser(userId) {
   return data.data // { id }
 }
 
+// ---- 注册申请与审批（Spec19 §7.6）----
+// 注意：拦截器不用改。40305（注册未开放）与既有的 40301/40302/40303/40304 互不
+// 干扰——拦截器只在 code === 40304 时才登出，而 40305 只可能出现在
+// /api/auth/register 上（一个未登录用户根本不会被登出）。40902/40903 是 409，
+// 拦截器不处理 409。
+
+export async function getRegisterConfig() {
+  const { data } = await http.get('/api/auth/register-config')
+  // { enabled, contact_email, qr_url, price_notice, daily_notice }
+  return data.data
+}
+
+export async function submitRegisterRequest({ username, password, phone, email, wechat }) {
+  const { data } = await http.post('/api/auth/register', {
+    username, password, phone, email, wechat
+  })
+  return data.data // { id }
+}
+
+export async function listRegisterRequests() {
+  const { data } = await http.get('/api/admin/register-requests')
+  // [{ id, username, phone, email, wechat, status, created_at, reviewed_at }]
+  // pending 优先、组内 id 倒序；**无** password_hash / ip（Spec19 §6.4）
+  return data.data
+}
+
+export async function approveRegisterRequest(id, quotaLimit) {
+  const { data } = await http.post(`/api/admin/register-requests/${id}/approve`, {
+    quota_limit: quotaLimit
+  })
+  return data.data // { id, username, is_admin, quota_limit }
+}
+
+export async function rejectRegisterRequest(id) {
+  const { data } = await http.post(`/api/admin/register-requests/${id}/reject`)
+  return data.data // { id }
+}
+
+export async function deleteRegisterRequest(id) {
+  const { data } = await http.delete(`/api/admin/register-requests/${id}`)
+  return data.data // { id }
+}
+
 // ---- 使用统计（Spec4 §6.1）----
 
 export async function getUsageStats() {

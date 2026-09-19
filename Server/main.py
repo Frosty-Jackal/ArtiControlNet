@@ -30,10 +30,14 @@ import wiki
 from agents.supervisor import run_supervisor
 from errors import (AppError, AuthTokenError, BadRequestError,
                     CommentContentError, CredentialsFormatError,
-                    FeedbackParamError, FileMissingError, ForbiddenError,
+                    DuplicateUsernameError, FeedbackParamError, FileMissingError,
+                    ForbiddenError,
                     GalleryItemNotFoundError, LoginFailedError,
-                    LoginRateLimitedError, NotFoundError, PostContentError,
-                    PostNotFoundError, QuotaExceededError, QuotaLimitError,
+                    LoginRateLimitedError, NotFoundError, PaymentQrMissingError,
+                    PostContentError, PostNotFoundError, QuotaExceededError,
+                    QuotaLimitError, RegisterAlreadyReviewedError,
+                    RegisterClosedError, RegisterRateLimitedError,
+                    RegisterRequestError, RegisterRequestNotFoundError,
                     ShareNotFoundError, SuggestionContentError,
                     SuggestionNotFoundError, UnsupportedImageTypeError,
                     UserNotFoundError)
@@ -305,8 +309,15 @@ app.add_middleware(
 
 # ---------- 统一鉴权中间件（Spec2 §6.2）----------
 
-# 放行列表：除登录外，所有 /api 接口都需登录态
-PUBLIC_AUTH_PATHS = {"/api/auth/login"}
+# 放行列表：除登录与注册链路的三个公开接口外，所有 /api 接口都需登录态（Spec19 §6.8）。
+# 这四个是**精确匹配**（`path not in PUBLIC_AUTH_PATHS`），不是前缀匹配——
+# 新增路径时必须原样写全，别写成 /api/auth/register 就以为能覆盖 -config。
+PUBLIC_AUTH_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",        # Spec19：提交注册申请（无登录态）
+    "/api/auth/register-config", # Spec19：注册弹窗的公开配置
+    "/api/auth/payment-qr",      # Spec19：收款码图片
+}
 
 
 def _bearer_token(request: Request) -> str:
@@ -1067,6 +1078,112 @@ async def me(request: Request):
     return _ok({"username": user["username"], "is_admin": user["is_admin"]})
 
 
+# ---------- 注册申请与审批（Spec19 §6.1~§6.3，前三个公开、后三个管理端）----------
+
+@app.get("/api/auth/register-config")
+async def register_config(request: Request):
+    """注册弹窗的公开配置（Spec19 §6.1）：是否开放、客服邮箱、收款码地址、两句提示语。
+
+    前端对客服邮箱与提示语**零副本**（与 Spec18 的 QUOTA_EXCEEDED_MESSAGE 同一条原则）。
+    **永远返回 200**，即使 enabled=false——前端要读 contact_email 才能显示客服行、
+    读 enabled 才知道要不要画注册按钮。
+
+    qr_url 用 _public_base 拼**绝对地址**（与作品/分享图一致），前端直接用，
+    不做任何拼接，这样 VITE_API_BASE 的独立部署场景也不用管。
+    """
+    return _ok({
+        "enabled": config.REGISTER_ENABLED,
+        "contact_email": config.SUPPORT_EMAIL,
+        "qr_url": f"{_public_base(request)}/api/auth/payment-qr",
+        "price_notice": config.REGISTER_PRICE_NOTICE,
+        "daily_notice": config.REGISTER_DAILY_NOTICE,
+    })
+
+
+@app.get("/api/auth/payment-qr")
+async def payment_qr():
+    """收款码图片（Spec19 §6.3）。**公开**：注册弹窗在登录之前，未登录访客必须能扫码。
+
+    收款码本身就是拿来给人扫的，公开不构成新的暴露面（§3.3-6）。
+    留在 /api 前缀内（而不是 /payment.jpg）：与分享页那种"故意公开的页面"不同，
+    这是一张给弹窗用的静态资源，PUBLIC_AUTH_PATHS 机制本来就能表达"公开"。
+    """
+    if not config.PAYMENT_QR_PATH.exists():
+        # 404 而不是 500：这是"部署时忘了放图"，不是服务坏了（§5.3）。
+        # 注册链路的其余部分照常工作——用户可以照常提交申请，线下联系时再收款。
+        raise PaymentQrMissingError()
+    data = config.PAYMENT_QR_PATH.read_bytes()
+    # 收款码不会天天换，弹窗每次打开都重拉一遍没必要
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.post("/api/auth/register")
+async def register_request(payload: schemas.RegisterRequestCreate, request: Request,
+                           x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """提交注册申请（Spec19 §6.2）：**落一条申请，不创建任何用户**。
+
+    校验顺序即契约（顺序变了，用户体验就变了）：格式 → 用户名占用 → IP 冷却。
+    格式全部排在冷却之前，否则一个手滑把手机号打成 10 位的用户会被直接锁 24 小时。
+    bcrypt 排在最后：它是故意慢的（约 100 ms 量级），没有理由在一条注定要被拒的
+    请求上做它。
+    """
+    request_id = _request_id(x_request_id)
+
+    # ① 开关
+    if not config.REGISTER_ENABLED:
+        raise RegisterClosedError()
+
+    # ②~⑦ 格式（每条都有自己的中文 message，所以都在这里判，而不是交给 Pydantic）
+    username = (payload.username or "").strip()
+    password = payload.password or ""
+    wechat = (payload.wechat or "").strip()
+    phone = (payload.phone or "").strip()
+    email = (payload.email or "").strip()
+    if not 2 <= len(username) <= 32:
+        raise RegisterRequestError("用户名需为 2~32 个字符")
+    if not 6 <= len(password) <= 72:
+        raise RegisterRequestError("密码需为 6~72 位")
+    if not wechat or len(wechat) > 64:
+        raise RegisterRequestError("请填写用于支付的微信昵称")
+    if not phone and not email:
+        raise RegisterRequestError("手机号与邮箱请至少填写一项")
+    if phone and (not phone.isdigit() or len(phone) != 11):
+        raise RegisterRequestError("手机号需为 11 位数字")
+    if email and ("@" not in email or not email.split("@")[0]
+                  or not email.split("@")[-1] or len(email) > 128):
+        raise RegisterRequestError("邮箱格式不正确（需包含 @，且 @ 前后都有内容）")
+
+    # ⑧ 用户名占用（**只是提前告知**：真正的唯一性约束仍是 users.username 的
+    #    UNIQUE 索引，在管理员点同意那一刻兜底，见 §3.3-2）
+    if db.get_user_by_username(username) is not None:
+        raise DuplicateUsernameError()
+
+    # ⑨ 同 IP 24 小时冷却（滚动窗口，判据见 §2.2）
+    ip = auth.client_ip(request)
+    if db.find_recent_register_by_ip(ip, config.REGISTER_IP_WINDOW_SECONDS) is not None:
+        # 日志里**不记 IP**——它已经存在库里（判重必需），再往日志里抄一份只是
+        # 让排障截图变成一次额外的信息泄露（§10）。
+        logger.warning("注册申请被冷却拒绝", extra={
+            "event": "auth.register_blocked", "request_id": request_id,
+            "username": username,
+        })
+        raise RegisterRateLimitedError()
+
+    # ⑩ 落库（密码在提交时就 bcrypt，库里全程没有明文）
+    record = db.create_register_request(
+        username, auth.hash_password(password),
+        phone or None, email or None,   # 空串存 NULL："没填"只有一种表示
+        wechat, ip,
+    )
+    logger.info("收到注册申请", extra={
+        "event": "auth.register_submitted", "request_id": request_id,
+        "register_id": record["id"], "username": username,
+        "has_phone": bool(phone), "has_email": bool(email),
+    })
+    return _ok({"id": record["id"]})
+
+
 @app.post("/api/admin/users")
 async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Request,
                             x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
@@ -1182,6 +1299,102 @@ async def admin_delete_user(user_id: int, request: Request,
         "username": operator["username"], "target_user": target["username"],
     })
     return _ok({"id": user_id})
+
+
+# ---------- 注册申请审批（Spec19 §6.4~§6.7，仅管理员）----------
+
+@app.get("/api/admin/register-requests")
+async def admin_list_register_requests(request: Request):
+    """注册申请台账（Spec19 §6.4）：pending 优先，组内 id 倒序（最新在前）。
+
+    **不含** password_hash（_register_row_to_dict 的默认行为，结构性保证），
+    **不含** ip（它只服务于冷却期判定，对"批准谁"这个决策没有帮助）。
+    无分页、无筛选：量级由 IP 冷却天然限制（每台设备每天最多 1 条）。
+    """
+    return _ok(db.list_register_requests())
+
+
+@app.post("/api/admin/register-requests/{request_id}/approve")
+async def admin_approve_register(request_id: int, payload: schemas.RegisterApproveRequest,
+                                 request: Request,
+                                 x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """同意注册申请（Spec19 §6.5）：**同一事务**内建号 + 改状态 + 置空哈希。
+
+    限额必须由管理员当次给定（0 ~ QUOTA_LIMIT_MAX）：弹窗里写着「1 元约 10 次」，
+    管理员按实收金额填才算把"预付"落到了账上。留空 = 用默认值会引出隐藏分支，
+    所以前端也不给默认值（§2.4）。
+    """
+    rid = _request_id(x_request_id)
+    operator = request.state.user
+    if payload.quota_limit < 0 or payload.quota_limit > config.QUOTA_LIMIT_MAX:
+        raise QuotaLimitError()
+    # 预检（with_secret=True 的两处之一；另一处是 db.approve_register_request 自己）：
+    # 它负责把"不存在"与"已处理"分成两个不同的码，真正的并发抢跑仍由
+    # db 层 `UPDATE ... AND status='pending'` 的 rowcount 兜底（§5.2B）。
+    record = db.get_register_request(request_id, with_secret=True)
+    if record is None:
+        raise RegisterRequestNotFoundError()
+    if record["status"] != "pending":
+        # 不能静默改成 rejected——那是在替管理员做决定
+        raise RegisterAlreadyReviewedError()
+    user = db.approve_register_request(request_id, payload.quota_limit)
+    if user is None:                      # 并发抢跑：事务已整体回滚，没有建出号
+        raise RegisterAlreadyReviewedError()
+    logger.info("同意注册申请", extra={
+        "event": "auth.register_reviewed", "request_id": rid,
+        "register_id": request_id, "operator": operator["username"],
+        "target_user": user["username"], "decision": "approved",
+        "quota_limit": payload.quota_limit,
+    })
+    return _ok({"id": user["id"], "username": user["username"],
+                "is_admin": user["is_admin"], "quota_limit": user["quota_limit"]})
+
+
+@app.post("/api/admin/register-requests/{request_id}/reject")
+async def admin_reject_register(request_id: int, request: Request,
+                                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """拒绝注册申请（Spec19 §6.6）：只改状态，**不建号、不删记录**。
+
+    记录留下来当台账（要清理得手动点「删除」），密码哈希也**保留**——
+    该密码从来没有生效过（§3.3-5）。
+    """
+    rid = _request_id(x_request_id)
+    operator = request.state.user
+    record = db.get_register_request(request_id)
+    if record is None:
+        raise RegisterRequestNotFoundError()
+    if db.reject_register_request(request_id) is None:
+        raise RegisterAlreadyReviewedError()
+    logger.info("拒绝注册申请", extra={
+        "event": "auth.register_reviewed", "request_id": rid,
+        "register_id": request_id, "operator": operator["username"],
+        "target_user": record["username"], "decision": "rejected",
+    })
+    return _ok({"id": request_id})
+
+
+@app.delete("/api/admin/register-requests/{request_id}")
+async def admin_delete_register(request_id: int, request: Request,
+                                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """删除一条申请记录（Spec19 §6.7，任意状态都能删）。
+
+    **不触碰 users**（§5.3）：users 是账号资源，register_requests 是审批台账，
+    两者没有级联关系——删除一条已同意的记录不会删除它建出来的用户。
+    副作用是"该 IP 的冷却期就此结束"（若这是它唯一的记录），这是一条有意的
+    逃生通道：用户手滑填错，管理员删掉废申请即可让他重填（§2.2）。
+    """
+    rid = _request_id(x_request_id)
+    operator = request.state.user
+    record = db.get_register_request(request_id)
+    if record is None:
+        raise RegisterRequestNotFoundError()
+    db.delete_register_request(request_id)
+    logger.info("删除注册申请", extra={
+        "event": "auth.register_deleted", "request_id": rid,
+        "register_id": request_id, "operator": operator["username"],
+        "target_user": record["username"], "was_status": record["status"],
+    })
+    return _ok({"id": request_id})
 
 
 @app.get("/api/admin/stats")

@@ -22,6 +22,9 @@ Server/artcn.db
 Server/artcn.db-wal
 Server/artcn.db-shm
 
+# 收款码（Spec19：含个人收款二维码与实名，仅本地留存）
+Server/payment.jpg
+
 # 本地 API 手册（含真实密钥，仅本地参考）
 API's Usage/
 
@@ -36,6 +39,9 @@ AD/
 
 # 内容运营（仅本地留存，勿提交）
 内容运营/
+
+# 个人作品集打包（仅本地留存，勿提交）
+作品集.zip
 
 # Python
 __pycache__/

@@ -4,9 +4,12 @@
       <h2>用户管理</h2>
       <button class="btn-clear" @click="emit('close')">返回聊天</button>
     </div>
+    <!-- Spec19 §7.5a：原文案"无公开注册"不再成立——注册申请与审批已上线。
+         待审批条数写进这一行，免得管理员每次都要滚过用户表才知道有没有活干。 -->
     <p class="admin-tip">
       当前登录：{{ auth.username }}（{{ auth.isAdmin ? '管理员' : '普通用户' }}）
-      · 账号仅由管理员创建，无公开注册
+      · 账号可由管理员创建，或由用户申请后审批开通
+      · <b class="tip-pending">待审批注册申请 {{ pendingCount }} 条</b>
     </p>
 
     <!-- 创建账号 -->
@@ -100,15 +103,50 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Spec19 §7.5b：注册申请台账。pending 在前（后端已排好序），
+         已处理的原样留在下方——它们是台账，不是待办。 -->
+    <section class="reg-admin">
+      <h3 class="reg-admin-title">待审批注册用户</h3>
+      <p v-if="requests.length === 0" class="reg-admin-empty">暂无注册申请</p>
+
+      <div v-for="r in requests" :key="r.id" class="reg-row">
+        <div class="reg-row-info">
+          <span class="reg-row-user">{{ r.username }}</span>
+          <span class="reg-row-cell">手机号：{{ r.phone || '—' }}</span>
+          <span class="reg-row-cell">邮箱：{{ r.email || '—' }}</span>
+          <span class="reg-row-cell">支付微信：{{ r.wechat }}</span>
+          <span class="reg-row-cell reg-row-time">{{ r.created_at }}</span>
+        </div>
+
+        <div class="reg-row-actions">
+          <template v-if="r.status === 'pending'">
+            <button class="btn-mini" :disabled="busyRegId === r.id" @click="approve(r)">同意</button>
+            <button class="btn-mini" :disabled="busyRegId === r.id" @click="reject(r)">拒绝</button>
+          </template>
+          <span v-else class="reg-row-done">
+            {{ r.status === 'approved' ? '已同意' : '已拒绝' }}
+          </span>
+          <!-- 已处理的记录仍要能被清理，否则台账只进不出（§2.4） -->
+          <button class="btn-mini danger" :disabled="busyRegId === r.id" @click="removeRequest(r)">
+            删除
+          </button>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
+  approveRegisterRequest,
   createUser,
+  deleteRegisterRequest,
   deleteUser,
+  listRegisterRequests,
   listUsers,
+  rejectRegisterRequest,
   resetUserPassword,
   setUserAdmin,
   updateUserQuota
@@ -126,11 +164,26 @@ const notice = ref('')
 const creating = ref(false)
 const busyId = ref(null)
 
+// Spec19 §7.5b：注册申请台账（pending 在前，后端已排好序）
+const requests = ref([])
+const busyRegId = ref(null)
+const pendingCount = computed(
+  () => requests.value.filter((r) => r.status === 'pending').length
+)
+
 async function load() {
   try {
     users.value = await listUsers()
   } catch (e) {
     error.value = e.message || '加载用户列表失败'
+  }
+}
+
+async function loadRequests() {
+  try {
+    requests.value = await listRegisterRequests()
+  } catch (e) {
+    error.value = e.message || '加载注册申请失败'
   }
 }
 
@@ -252,5 +305,76 @@ async function remove(u) {
   }
 }
 
-onMounted(load)
+// ---- Spec19 §7.5c：注册申请的三个处理动作 ----
+
+// 同意 = 弹框填限额（与「改限额」逐字同款交互）。
+// **不传 prompt 的第二个参数**（不给默认值）：前端拿不到 QUOTA_DEFAULT_LIMIT
+// （那是后端的建号默认值，没在公开配置里），写死 25 就是复制一个会漂移的常量
+// ——与 Spec18 §7.5 对 QUOTA_LIMIT_MAX 的处理同一个理由。管理员填多少由他跟
+// 用户的实际付款决定，本来就不该被一个前端默认值暗示。
+async function approve(r) {
+  const input = window.prompt(
+    `同意「${r.username}」的注册申请，并设置服务限额（累计可用次数）：`
+  )
+  if (input === null) return                       // 取消
+  const raw = input.trim()
+  const n = Number(raw)
+  // 与 editQuota 同样的三个坑：raw 为空必须单独拦（Number('') === 0 会让
+  // "清空直接确定"静默变成限额 0 = 禁用该账号）；用 Number.isInteger 而非
+  // parseInt（parseInt('25abc') 会静默变成 25）；上限交给后端 40017 报。
+  if (!raw || !Number.isInteger(n) || n < 0) {
+    error.value = '限额需为不小于 0 的整数'
+    return
+  }
+  error.value = ''
+  busyRegId.value = r.id
+  try {
+    await approveRegisterRequest(r.id, n)
+    flash(`已开通账号：${r.username}`)
+    // 本文件里唯一一个影响两处数据的动作：申请列表少一条待办，用户表格多一行
+    await loadRequests()
+    await load()
+  } catch (e) {
+    error.value = e.message || '审批失败'
+  } finally {
+    busyRegId.value = null
+  }
+}
+
+async function reject(r) {
+  if (!window.confirm(`确定拒绝「${r.username}」的注册申请？`)) return
+  error.value = ''
+  busyRegId.value = r.id
+  try {
+    await rejectRegisterRequest(r.id)
+    flash(`已拒绝「${r.username}」的注册申请`)
+    await loadRequests()
+  } catch (e) {
+    error.value = e.message || '操作失败'
+  } finally {
+    busyRegId.value = null
+  }
+}
+
+async function removeRequest(r) {
+  // 确认文案里**不提"账号"**：删除记录不动账号，别让管理员误会会删号
+  if (!window.confirm('确定删除这条申请记录？此操作不可撤销。')) return
+  error.value = ''
+  busyRegId.value = r.id
+  try {
+    await deleteRegisterRequest(r.id)
+    flash('已删除该条申请记录')
+    await loadRequests()
+  } catch (e) {
+    error.value = e.message || '删除失败'
+  } finally {
+    busyRegId.value = null
+  }
+}
+
+// 并行拉两张表
+onMounted(() => {
+  load()
+  loadRequests()
+})
 </script>

@@ -243,6 +243,61 @@ class QuotaLimitError(BadRequestError):
         )
 
 
+# ---- 注册申请与审批（Spec19 §9，追加到 Spec18 §9 之后）----
+
+class RegisterRequestError(BadRequestError):
+    """注册申请字段非法（长度 / 纯数字 / @ 位置）。"""
+
+    def __init__(self, message: str = "注册申请信息非法"):
+        super().__init__(message, code=40018)
+
+
+class RegisterClosedError(AppError):
+    """注册申请暂未开放（REGISTER_ENABLED=false）。"""
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            40305,
+            message or f"注册申请暂未开放，请联系客服 {config.SUPPORT_EMAIL}",
+            status_code=403,
+        )
+
+
+class RegisterRequestNotFoundError(NotFoundError):
+    """注册申请不存在。"""
+
+    def __init__(self, message: str = "注册申请不存在"):
+        super().__init__(message, code=40409)
+
+
+class PaymentQrMissingError(NotFoundError):
+    """收款码文件缺失（部署时忘了放 Server/payment.jpg）。"""
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message or f"收款码暂未配置，请联系客服 {config.SUPPORT_EMAIL}", code=40410
+        )
+
+
+class RegisterRateLimitedError(AppError):
+    """同一 IP 在冷却期内已提交过申请（Spec19 §2.2）。"""
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            40902,
+            message or (f"每台设备每天只能提交一次注册申请，"
+                        f"请明天再试或联系客服 {config.SUPPORT_EMAIL}"),
+            status_code=409,
+        )
+
+
+class RegisterAlreadyReviewedError(AppError):
+    """该申请已被处理（或两个管理员同时点了同意，后到的那个）。"""
+
+    def __init__(self, message: str = "该申请已处理"):
+        super().__init__(40903, message, status_code=409)
+
+
 class InternalError(AppError):
     def __init__(self, message="内部错误"):
         super().__init__(50001, message, status_code=500)

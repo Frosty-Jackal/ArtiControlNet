@@ -8,7 +8,7 @@
 """
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 from errors import DuplicateUsernameError
@@ -227,11 +227,46 @@ CREATE TABLE IF NOT EXISTS wiki (
 )
 """
 
+# 注册申请（Spec19 §5.1a）：一行 = 一条待处理/已处理的注册申请。
+# **不是用户表**：申请阶段不创建任何 users 行，同意时才在同一事务里建号（§1.3）。
+# 刻意**没有** UNIQUE(username)：同一用户名允许多条被拒绝的历史记录，
+# 唯一性由 users.username 的 UNIQUE 在同意那一刻兜底（§3.3-2）。
+# ip 列是防重复的唯一判据（§2.2），不对外暴露（接口响应里没有它）。
+_CREATE_REGISTER_REQUESTS_TABLE = """
+CREATE TABLE IF NOT EXISTS register_requests (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL,             -- 申请的用户名（同意时原样建号）
+    password_hash TEXT NOT NULL,             -- bcrypt；同意后置为 ''（§2.1）
+    phone         TEXT,                      -- 手机号（纯数字 11 位）；与 email 至少有一个
+    email         TEXT,                      -- 邮箱；与 phone 至少有一个
+    wechat        TEXT NOT NULL,             -- 用于支付的微信昵称（管理员对账用）
+    ip            TEXT NOT NULL,             -- 提交来源 IP（防重复判据，不出接口）
+    status        TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+    created_at    TEXT NOT NULL,             -- 提交时刻（UTC ISO）
+    reviewed_at   TEXT                       -- 同意/拒绝的时刻（NULL = 尚未处理）
+)
+"""
+
+# 冷却期查询走这条索引：WHERE ip = ? AND created_at >= ? ORDER BY id DESC
+_CREATE_REGISTER_REQUESTS_IP_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_register_requests_ip "
+    "ON register_requests(ip, created_at DESC, id DESC)"
+)
+
+# 列表查询走这条：pending 优先 + 组内 id 倒序（§6.4）
+_CREATE_REGISTER_REQUESTS_STATUS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_register_requests_status "
+    "ON register_requests(status, id DESC)"
+)
+
 # 反馈类别白名单（set_feedback 校验，不拼接外部输入）
 _FEEDBACK_CATEGORIES = ("generate", "edit", "qa")
 _FEEDBACK_VOTES = ("like", "dislike")
 # 建议状态白名单（update_suggestion 校验）
 _SUGGESTION_STATUSES = ("pending", "resolved")  # Spec10：收敛两态，去掉 read / 待用户处理
+
+# 申请状态白名单（Spec19 §5.1b，approve / reject 校验，不拼接外部输入）
+_REGISTER_STATUSES = ("pending", "approved", "rejected")
 
 # 待考虑作品来源白名单（Spec15 §5.1）：生成/绘图作品带 prompt，上传作品带图片字节
 # （走视觉 QA 逐张分析）。三者同一套 wiki_used 语义——真的被纳入过才置 1。
@@ -411,6 +446,34 @@ def _post_comment_row_to_dict(row: sqlite3.Row | None) -> dict | None:
     return record
 
 
+def _register_row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict | None:
+    """申请行 → dict（Spec19 §5.1c）。
+
+    与 _row_to_dict（users）同样的约定：**默认不带出 `password_hash`**。
+    它只有一处真正需要——同意时把哈希写进新建的 users 行（批准路径），
+    因此 `with_secret=True` 全仓只出现在 `approve_register_request` 与
+    批准路由的预检两处。列表接口（GET /api/admin/register-requests）
+    拿到的字典在结构上就不可能有这个键。
+
+    另外**不带出 `ip`**：它只服务于冷却期判定，接口层没有它的位置（§2.2）。
+    """
+    if row is None:
+        return None
+    record = {
+        "id": row["id"],
+        "username": row["username"],
+        "phone": row["phone"],
+        "email": row["email"],
+        "wechat": row["wechat"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "reviewed_at": row["reviewed_at"],
+    }
+    if with_secret:
+        record["password_hash"] = row["password_hash"]
+    return record
+
+
 # ---------- 生命周期 ----------
 
 def _migrate_images_wiki_used(conn: sqlite3.Connection) -> None:
@@ -578,6 +641,12 @@ def init_db() -> None:
         conn.execute(_CREATE_CHAT_MESSAGES_INDEX)
         conn.execute(_CREATE_POST_COMMENTS_TABLE)
         conn.execute(_CREATE_POST_COMMENTS_INDEX)
+        # Spec19 §5.1a：注册申请表。全新空表，CREATE TABLE IF NOT EXISTS 对新库与
+        # 存量库行为一致，**不需要**迁移函数（与 Spec18 的 _backfill_user_quota 不同，
+        # 那个要给已存在的数据补一份派生账本，这里没有已存在的数据）。
+        conn.execute(_CREATE_REGISTER_REQUESTS_TABLE)
+        conn.execute(_CREATE_REGISTER_REQUESTS_IP_INDEX)
+        conn.execute(_CREATE_REGISTER_REQUESTS_STATUS_INDEX)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         # Spec12 §5.1b：存量库补 images.wiki_used 列
@@ -1594,3 +1663,133 @@ def delete_comment(comment_id: int) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM post_comments WHERE id = ?", (comment_id,))
         conn.commit()
+
+
+# ---------- 注册申请与审批（Spec19 §5.1d）----------
+
+def create_register_request(username: str, password_hash: str, phone: str | None,
+                            email: str | None, wechat: str, ip: str) -> dict:
+    """插入一条 pending 申请，返回完整记录（**不含** password_hash）。"""
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO register_requests "
+            "(username, password_hash, phone, email, wechat, ip, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (username, password_hash, phone, email, wechat, ip, _now_iso()),
+        )
+        conn.commit()
+        request_id = cur.lastrowid
+    return get_register_request(request_id)
+
+
+def get_register_request(request_id: int, *, with_secret: bool = False) -> dict | None:
+    """按 id 取申请；不存在返回 None。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM register_requests WHERE id = ?", (request_id,)
+        ).fetchone()
+    return _register_row_to_dict(row, with_secret=with_secret)
+
+
+def list_register_requests() -> list[dict]:
+    """全部申请：**pending 优先**，组内 id 倒序（最新在前）。不含 password_hash / ip。
+
+    排序写成 `ORDER BY (status = 'pending') DESC, id DESC`：
+    SQLite 里布尔表达式求值为 0/1，所以"是 pending 的排前面"是一行 SQL 的事。
+    已处理的记录按时间倒序跟在后面——它们是台账，不是待办。
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM register_requests "
+            "ORDER BY (status = 'pending') DESC, id DESC"
+        ).fetchall()
+    return [_register_row_to_dict(r) for r in rows]
+
+
+def find_recent_register_by_ip(ip: str, window_seconds: int) -> dict | None:
+    """该 IP 在冷却期内的最近一条申请；没有则 None（Spec19 §2.2）。
+
+    截止时刻在 **Python 侧**算好再传进 SQL，不用 SQLite 的 datetime('now','-1 day')：
+    created_at 是 `YYYY-MM-DDTHH:MM:SS.mmmZ` 形态（_now_iso），
+    与 SQLite 默认的 `YYYY-MM-DD HH:MM:SS` 格式**字符串不可比**。
+    同格式同宽度的 ISO 串，字典序即时间序，直接 `>=` 比较是安全的。
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=window_seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM register_requests WHERE ip = ? AND created_at >= ? "
+            "ORDER BY id DESC LIMIT 1",
+            (ip, cutoff),
+        ).fetchone()
+    return _register_row_to_dict(row)
+
+
+def approve_register_request(request_id: int, quota_limit: int) -> dict | None:
+    """同意：**单事务**内建号 + 改状态 + 置空哈希。返回新建的用户 dict；
+    该行已不是 pending（并发抢跑）时返回 None（调用方转 40903）。
+    用户名撞 UNIQUE 时抛 DuplicateUsernameError（调用方转 40901）。
+
+    为什么必须一个事务：若先 create_user() 提交、再单独改状态，中间会开出一个
+    "号已经建了，但申请记录还是 pending"的窗口。管理员此时再点一次「同意」→ 撞
+    `40901 用户名已存在` → 那条记录永远停在 pending、永远点不动。这与 Spec18
+    §5.1g「record_call 必须一次事务写两张表」是同一类错误：跨表的状态必须同生同死。
+
+    quota_limit 直接写在 INSERT 里，而不是建完号再调 set_user_quota：后者是第二次
+    事务，同样会开出"号建了但限额还是默认值"的窗口。users.quota_limit 本来就有列
+    默认值（QUOTA_DEFAULT_LIMIT），显式传值只是覆盖它——一条语句解决。
+
+    user_quota 行不用建：_USER_SELECT 用 LEFT JOIN + COALESCE(q.used, 0)，
+    没有 quota 行等价于"已用 0 次"。新建的号由第一次 record_call 的 UPSERT 建行
+    ——与既有的 create_user 行为完全一致，不引入第二条路径。
+    """
+    req = get_register_request(request_id, with_secret=True)
+    if req is None:
+        return None
+    now = _now_iso()
+    try:
+        with _connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO users (username, password_hash, is_admin, created_at, quota_limit) "
+                "VALUES (?, ?, 0, ?, ?)",
+                (req["username"], req["password_hash"], now, quota_limit),
+            )
+            user_id = cur.lastrowid
+            # 并发判据用 WHERE ... AND status='pending' 的 rowcount，而不是"先查后写"：
+            # 两个管理员同时点同意时，后到的那个 UPDATE 影响 0 行 → 整个事务回滚。
+            marked = conn.execute(
+                "UPDATE register_requests "
+                "SET status = 'approved', reviewed_at = ?, password_hash = '' "
+                "WHERE id = ? AND status = 'pending'",
+                (now, request_id),
+            )
+            if marked.rowcount == 0:
+                conn.rollback()
+                return None
+            conn.commit()
+    except sqlite3.IntegrityError as exc:      # users.username UNIQUE 撞车
+        raise DuplicateUsernameError(f"用户名已存在: {req['username']}") from exc
+    return get_user_by_id(user_id)
+
+
+def reject_register_request(request_id: int) -> dict | None:
+    """拒绝：只改状态。**保留 password_hash**（该密码从未生效，见 §3.3-5）。
+    该行已不是 pending 时返回 None。"""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE register_requests SET status = 'rejected', reviewed_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (_now_iso(), request_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+    return get_register_request(request_id)
+
+
+def delete_register_request(request_id: int) -> bool:
+    """删掉一条申请记录（任意状态）。**不触碰 users**（§5.3）。返回是否有行被删。"""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM register_requests WHERE id = ?", (request_id,))
+        conn.commit()
+    return cur.rowcount > 0
