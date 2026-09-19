@@ -28,7 +28,13 @@
                用户照常能提交申请，线下联系时再收款（Spec21 §7.3）。 -->
           <div class="reg-pay">
             <img v-if="qrUrl" class="reg-qr rc-qr" :src="qrUrl" alt="收款码" />
-            <p v-if="priceNotice" class="reg-pay-title rc-note">{{ priceNotice }}</p>
+            <!-- Spec23 §2.8：参考价改成"排版片段"。片段里的 strike 为真时套一层 <s>
+                 （删除线）——划线位置是**后端给的数据**，不是前端在前缀里找 "0.9"。
+                 没有 v-html：那是个 XSS 面，而这句话里有服务端可控的数字。 -->
+            <p v-if="priceLine.length" class="reg-pay-title rc-note">
+              <template v-for="(seg, i) in priceLine" :key="i"
+                ><s v-if="seg.strike">{{ seg.text }}</s><template v-else>{{ seg.text }}</template></template>
+            </p>
           </div>
 
           <!-- 账号输入框：仅 mode="overdue"。登录页被踢出来的场景由 App.vue
@@ -71,9 +77,11 @@ const account = ref(props.username)
 const wechat = ref('')
 const balance = ref(null)
 const qrUrl = ref('')
-// 参考价的措辞两个模式**故意不同**（Spec21 §7.3）：前者出自需求 4 的原话，
-// 后者出自需求 6 的原话。两句都来自后端，前端一个字的文案副本都不放。
-const priceNotice = ref('')
+// 参考价两个模式**故意不同**（Spec21 §7.3）：前者出自需求 4 的原话，后者出自需求 6 的原话。
+// Spec23 §2.8：两边都是"排版片段数组"（形状一致，所以下面两个分支共用一份渲染），
+// 只有 /api/recharge/info 那份带一个 strike 片段。
+// 两句都来自后端，前端一个字的文案副本都不放。
+const priceLine = ref([])
 const error = ref('')
 const loading = ref(false)
 const done = ref(false)
@@ -90,11 +98,11 @@ onMounted(async () => {
       // register-config 永远返回 200（即使 REGISTER_ENABLED=false），欠费用户拿得到。
       const cfg = await getRegisterConfig()
       qrUrl.value = cfg.qr_url
-      priceNotice.value = cfg.price_notice
+      priceLine.value = cfg.price_line
     } else {
       const info = await getRechargeInfo()
       qrUrl.value = info.qr_url
-      priceNotice.value = info.price_notice
+      priceLine.value = info.price_line
       balance.value = info.balance
     }
   } catch (e) {

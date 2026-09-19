@@ -163,29 +163,32 @@ class CommentCreateRequest(BaseModel):
 # ---- 注册申请与审批（Spec19 §6.2 / §6.5）----
 
 class RegisterRequestCreate(BaseModel):
-    """POST /api/auth/register 请求体（Spec22 §6.1，Spec19 §6.2 的改造版）。
+    """POST /api/auth/register 请求体（Spec23 §5.5，Spec22 §6.1 的改造版）。
 
     全部字段都是裸 str：格式规则（长度、纯数字、@ 位置）一律在路由层判，
     好让每一条都有自己的中文 message。Pydantic 只负责"字段在不在"。
 
-    ⚠️ **没有 `phone` 了**。删字段**不是**改成 Optional：留着一个可选字段，
-    就留了一条能被写进已删列的路（§5.1）。
+    ⚠️ **没有 `phone` 了**（Spec22 §5.1 删的）。删字段**不是**改成 Optional：
+    留着一个可选字段，就留了一条能被写进已删概念的路。
+    ⚠️ **没有 `wechat` 了**（Spec23 §5.5 删的）：注册与对账从此刻起完全无关，
+    微信昵称只对**充值**有效（`recharge_requests.wechat` 一个字没动）。
+    ⚠️ 请求体里带 `wechat` 时**不报错也不理会**——Pydantic 默认忽略未知字段。
+    **别加 `model_config = ConfigDict(extra="forbid")`**：那会让旧的、还带着
+    wechat 的前端构建**当场 400**，而 GitHub Pages 上可能还跑着旧版（§6.1）。
     """
 
     username: str
     password: str
     email: str          # Spec22：必填（原 phone / email 二选一已成历史）
     code: str           # Spec22：邮箱验证码（4 位数字，格式在路由层判）
-    wechat: str
 
 
-class RegisterApproveRequest(BaseModel):
-    """POST /api/admin/register-requests/{id}/approve 请求体（Spec19 §6.5）。
-
-    非整数由 Pydantic 拦下 → 40001；取值范围在路由层判 → 40017（复用 Spec18）。
-    """
-
-    quota_limit: int
+# Spec23 §5.5 删除：class RegisterApproveRequest(BaseModel)
+#   唯一消费者是 POST /api/admin/register-requests/{id}/approve，那条路由整个删了
+#   （§2.2）。它的 docstring 里那句"非整数由 Pydantic 拦下 → 40001"随它一起作废。
+#   ⚠️ 它是 QuotaLimitError(40017) 的三个生产者之一，但**另外两个还在**
+#   （PUT /api/admin/users/{id}/quota、POST /api/admin/recharge-requests/{id}/approve），
+#   所以 40017 不退休。
 
 
 # ---- 余额与充值（Spec21 §6.2~§6.5）----

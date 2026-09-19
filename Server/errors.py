@@ -273,11 +273,11 @@ class RegisterClosedError(AppError):
         )
 
 
-class RegisterRequestNotFoundError(NotFoundError):
-    """注册申请不存在。"""
-
-    def __init__(self, message: str = "注册申请不存在"):
-        super().__init__(message, code=40409)
+# Spec23 §9 删除：class RegisterRequestNotFoundError(NotFoundError)  # 40409
+#   唯一语义是"这条注册申请不存在/已被删"，消费者是 approve/reject/delete 三条路由
+#   （它们都删了，§6.2）。
+#   ⚠️ **不把这个码改嫁给任何新语义**：重定义既有码会让旧日志里的 40409 变成假话
+#   （Spec22 §2.11 删 40902 时定的规矩，同款）。
 
 
 class PaymentQrMissingError(NotFoundError):
@@ -295,11 +295,10 @@ class PaymentQrMissingError(NotFoundError):
 #   **不把它改嫁给"验证码重发冷却"**：重定义既有码会让旧日志里的 40902 变成假话（§2.11）。
 
 
-class RegisterAlreadyReviewedError(AppError):
-    """该申请已被处理（或两个管理员同时点了同意，后到的那个）。"""
-
-    def __init__(self, message: str = "该申请已处理"):
-        super().__init__(40903, message, status_code=409)
+# Spec23 §9 删除：class RegisterAlreadyReviewedError(AppError)  # 40903
+#   唯一语义是"这条申请已经不是 pending 了"，消费者同上三条被删的路由
+#   （含 db 层并发抢跑返回 None 的那两支）。
+#   同样**不改嫁**（理由与上面 40409 一致）。
 
 
 # ---- 余额与充值（Spec21 §9，追加到 Spec19 §9 之后）----

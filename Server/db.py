@@ -228,37 +228,18 @@ CREATE TABLE IF NOT EXISTS wiki (
 )
 """
 
-# 注册申请（Spec19 §5.1a）：一行 = 一条待处理/已处理的注册申请。
-# **不是用户表**：申请阶段不创建任何 users 行，同意时才在同一事务里建号（§1.3）。
-# 刻意**没有** UNIQUE(username)：同一用户名允许多条被拒绝的历史记录，
-# 唯一性由 users.username 的 UNIQUE 在同意那一刻兜底（§3.3-2）。
-#
-# Spec22 §2.1：**删掉了 phone 与 ip 两列**（不可逆）。email 成为必填的唯一定位键
-# ——注册要过邮箱验证码，所以"至少填一项联系方式"这个二选一不存在了。
-# ip 一列连同它的冷却索引一并删除：注册的防刷改由邮箱验证码承担（§2.5），
-# 于是 register_requests 在本仓第一次不含任何非必要 PII。
-# 存量行的 email 可能是 NULL（旧申请只有手机号），故本列**可空**——读路径要容忍。
-_CREATE_REGISTER_REQUESTS_TABLE = """
-CREATE TABLE IF NOT EXISTS register_requests (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT NOT NULL,             -- 申请的用户名（同意时原样建号）
-    password_hash TEXT NOT NULL,             -- bcrypt；同意后置为 ''（§2.1）
-    email         TEXT,                      -- 邮箱（唯一联系方式；存量旧行可能为 NULL）
-    wechat        TEXT NOT NULL,             -- 用于支付的微信昵称（管理员对账用）
-    status        TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
-    created_at    TEXT NOT NULL,             -- 提交时刻（UTC ISO）
-    reviewed_at   TEXT                       -- 同意/拒绝的时刻（NULL = 尚未处理）
-)
-"""
-
-# 列表查询走这条：pending 优先 + 组内 id 倒序（§6.4）
-_CREATE_REGISTER_REQUESTS_STATUS_INDEX = (
-    "CREATE INDEX IF NOT EXISTS idx_register_requests_status "
-    "ON register_requests(status, id DESC)"
-)
+# Spec23 §2.2 删除：_CREATE_REGISTER_REQUESTS_TABLE 与
+#   _CREATE_REGISTER_REQUESTS_STATUS_INDEX（Spec19 §5.1a 的注册申请表定义）。
+#   注册从"提交申请 → 等管理员审批"改成"验证码一过直接建号"，于是这张表没有
+#   生产者了：整个审批链路（表 / 4 条管理端路由 / 审批区 UI / 审批邮件 /
+#   RegisterApproveRequest / 2 个错误码）一起拆掉。
+#   留在库里的是 DROP TABLE（_migrate_drop_register_requests，§5.3），
+#   不是这两行定义——留着它们会每次启动"建了又删"，见 §14 陷阱 4。
+#   连带删除的 7 个函数 + _register_row_to_dict 见本文件 §5.2 的清单。
 
 # 充值台账（Spec21 §5.3）：一行 = 一条待处理/已处理的充值申请。
-# 「台账」语义与 Spec19 的 register_requests 完全相同：同意/拒绝都保留记录（status），
+# 「台账」语义与 Spec19 的注册申请表完全相同（那张表 Spec23 已整表删除，见 §2.2）：
+# 同意/拒绝都保留记录（status），
 # 只有「删除」才真删行（§2.3）。刻意**没有** UNIQUE(user_id, status)——
 # 被拒绝之后必须能再申请，唯一性靠 status='pending' 的幂等查询兜（§2.4）。
 # 刻意**没有** ip 列：防刷靠幂等而不是冷却，于是本表不含任何多余 PII（§2.3）。
@@ -290,7 +271,8 @@ _CREATE_RECHARGE_REQUESTS_STATUS_INDEX = (
 
 # 邮箱验证码（Spec22 §5.2）：只装**最近 TTL 内**的码，发一次码顺手清一次过期行。
 #
-# **不是台账**：与 register_requests / recharge_requests 不同，这张表没有 status、
+# **不是台账**：与 recharge_requests 不同（Spec19 的 register_requests 已随
+# Spec23 §2.2 整表删除），这张表没有 status、
 # 没有"同意/拒绝"、不保留历史（§3.3-10）。别把它当审计表用。
 # purpose 一列是这个设计的关键：三个场景（注册 / 登录 / 改密码）共一张表，就必须
 # 回答"这个码是给哪个场景发的"——**校验时按 purpose 匹配**，否则一个为"注册"发的
@@ -403,7 +385,7 @@ def _row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict 
     Spec21 §5.1 带出了 `phone` / `email` 两项联系方式；**Spec22 §5.1 起只剩 `email`
     一项 PII**（`phone` 列已从库里删掉）。它仍然会流向若干地方，其中**只有
     `list_users()` → `GET /api/admin/users` 是接口响应**（仅管理员）；其余
-    （get_user_by_id / get_user_by_username / set_user_quota / approve_register_request）
+    （get_user_by_id / get_user_by_username / set_user_quota / approve_recharge_request）
     的调用方都只取自己需要的字段再手写一个小 dict 返回，不会把整个 dict 直接
     `_ok(...)` 出去。**新增读 users 的路由时要保持这个约定。**
 
@@ -541,39 +523,14 @@ def _post_comment_row_to_dict(row: sqlite3.Row | None) -> dict | None:
     return record
 
 
-def _register_row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict | None:
-    """申请行 → dict（Spec19 §5.1c）。
-
-    与 _row_to_dict（users）同样的约定：**默认不带出 `password_hash`**。
-    它只有一处真正需要——同意时把哈希写进新建的 users 行（批准路径），
-    因此 `with_secret=True` 全仓只出现在 `approve_register_request` 与
-    批准路由的预检两处。列表接口（GET /api/admin/register-requests）
-    拿到的字典在结构上就不可能有这个键。
-
-    Spec22 §5.1：`phone` 与 `ip` 两列随需求 3 一起从库里删掉了，所以本函数
-    **没有**"要记得不带出 ip"这回事了——列都没了。剩下的唯一联系方式是 `email`
-    （存量旧行可能为 NULL）。
-    """
-    if row is None:
-        return None
-    record = {
-        "id": row["id"],
-        "username": row["username"],
-        "email": row["email"],
-        "wechat": row["wechat"],
-        "status": row["status"],
-        "created_at": row["created_at"],
-        "reviewed_at": row["reviewed_at"],
-    }
-    if with_secret:
-        record["password_hash"] = row["password_hash"]
-    return record
-
+# Spec23 §5.2 删除：_register_row_to_dict(row, *, with_secret=False)
+#   唯一的作用是把 register_requests 的行转成 dict，消费者只有被删的那 7 个函数。
+#   ⚠️ 别把它与 _row_to_dict（**users** 的，仍然留着）搞混——名字只差一个前缀。
 
 def _recharge_row_to_dict(row: sqlite3.Row | None) -> dict | None:
     """充值行 → dict（Spec21 §5.4）。
 
-    **没有 `with_secret`**——本表根本没有密码列（对比 `_register_row_to_dict`）。
+    **没有 `with_secret`**——本表根本没有密码列（对比 `_row_to_dict`，users 的）。
     **不带出 `ip`**——本表连这一列都没有（§2.3，防刷靠幂等而不是冷却）。
     """
     if row is None:
@@ -657,38 +614,29 @@ def _migrate_users_quota_limit(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_users_contact(conn: sqlite3.Connection) -> None:
-    """存量库补 users.email（Spec21 §5.1），并把已开通用户的联系方式回填一次。
+    """存量库补 users.email 列（Spec21 §5.1）。
 
-    回填只在"确实补过列"的那次跑：库里的 register_requests 是唯一来源，
-    它不会变（Spec19 的申请行只增不隐），所以回填天然一次性。
+    Spec23 §2.2：**回填那一段整个删掉**——回填源 register_requests 已经不存在了
+    （自助注册之后不再有"申请行"这个概念，见 §2.5）。函数因此瘦成"补一列"，
+    连 `else: return` 都不需要了：那个分支原本的语义是"补过列就不再回填"，
+    没有回填之后它无事可做。
 
-    只认 status='approved' 的行：被拒绝的申请里的联系方式**不属于任何账号**
-    （那个人从来没被开通），拿它填进去等于凭空捏造一条联系方式（§2.1）。
-
-    已知边界（§3.3-7，**不修**）：用户被删后重建同名账号，回填会把前一个人的
-    联系方式填到新账号上——那是同名的两个人，本函数无法区分。
+    已知边界（Spec21 §3.3-7，**随回填一起作废**）：用户被删后重建同名账号时，
+    回填会把前一个人的联系方式填到新账号上——那个边界是**回填**带出来的，
+    回填没了，边界也没了。
 
     Spec22 §5.1：本函数原来还负责 `phone` 那半（补列 + 回填），随电话三列的
-    删除一起去掉了——现在只补/回填 `email` 一列。⚠️ 位置约束：它必须排在
-    `_migrate_drop_phone_and_ip` **之前**（顺序反了，旧库的 phone 会被这里加回来）。
+    删除一起去掉了。⚠️ 位置约束：它必须排在 `_migrate_drop_phone_and_ip`
+    **之前**（顺序反了，旧库的 phone 会被这里加回来）。
+    Spec23 §5.2：位置约束继续保持——虽然它不再读 register_requests、与
+    `_migrate_drop_register_requests` 之间已无数据依赖，但将来若有人把回填
+    加回来，排错顺序的代价是静默丢数据，而写死顺序的成本是 0。
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "email" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
-    else:
-        return
-    # ORDER BY r.id DESC LIMIT 1 是**纯防御**：users.username 有 UNIQUE，所以同一个
-    # 用户名最多只会有一条 approved 申请（第二条会在建号时撞 40001）。写明它只是
-    # 为了让"取哪一条"有一个确定的答案。
-    conn.execute(
-        "UPDATE users SET "
-        "  email = (SELECT r.email FROM register_requests r "
-        "           WHERE r.username = users.username AND r.status = 'approved' "
-        "           ORDER BY r.id DESC LIMIT 1) "
-        "WHERE EXISTS (SELECT 1 FROM register_requests r "
-        "              WHERE r.username = users.username AND r.status = 'approved')"
-    )
-    logger.info("users.email 列已补齐并回填", extra={"event": "db.migrate"})
+        # 日志去掉"并回填"三个字：这个函数不再回填任何东西。
+        logger.info("users.email 列已补齐", extra={"event": "db.migrate"})
 
 
 def _migrate_drop_phone_and_ip(conn: sqlite3.Connection) -> None:
@@ -737,14 +685,58 @@ def _migrate_lowercase_emails(conn: sqlite3.Connection) -> None:
     """把存量邮箱统一成小写（Spec22 §2.8）。
 
     不做的话，一个在 Spec21 时代用大写邮箱注册的账号，**邮箱登录永远进不去**
-    （而用户完全不知道为什么）。两条 UPDATE 各自幂等：第二次启动影响 0 行。
+    （而用户完全不知道为什么）。这条 UPDATE 幂等：第二次启动影响 0 行。
+
+    Spec23 §5.2：循环元组从 ("users", "register_requests") 缩成 ("users",)。
+    ⚠️ 这一处**必须改**，而且它与 `_migrate_drop_register_requests` 的**位置**
+       是**两条独立的保险**，缺一不可（§14 陷阱 3）：
+         · 只改顺序（把 DROP 排到这里之后）而不改元组 → 第一次启动没事，
+           **第二次启动**在这行 UPDATE 上抛 "no such table" —— 服务再也起不来。
+         · 只改元组而不改顺序 → 已在跑的库没事，但一个 pre-Spec23 的库升级上来时，
+           DROP 先跑、这里再 UPDATE 之前表已经没了 → 同样崩。
+       两条都做，才既对"升级那次"成立、也对"之后每一次"成立。
 
     注意这边**不碰**空串/NULL：`email <> LOWER(email)` 对 NULL 求值为 NULL，
     行不会被选中，正是我们要的。
     """
-    for table in ("users", "register_requests"):
+    for table in ("users",):
         conn.execute(f"UPDATE {table} SET email = LOWER(email) WHERE email <> LOWER(email)")
     conn.commit()
+
+
+def _migrate_drop_register_requests(conn: sqlite3.Connection) -> None:
+    """删掉 register_requests 表（Spec23 §2.2）。**不可逆**，回滚只能靠备份文件。
+
+    判据是 sqlite_master 里还有没有这张表（而不是"表里有没有行"）——空表同样要删，
+    留着它就是留一个"看起来还在生效"的空壳（Spec22 §2.1 的同一条理由）。
+
+    ⚠️ 硬位置约束：**必须排在 _migrate_lowercase_emails 之后**（§5.3 那张表）。
+    那一步会 `UPDATE register_requests SET email = LOWER(email)`，排在它前面的话
+    表先没了、它当场抛 `no such table`，**服务起不来**。这是本 Spec 唯一一条
+    "排错就崩"的约束（其余几条排错只是静默失效或读取顺序难看）。
+    ⚠️ 同时 §5.2 那个循环元组也要改——**两条缺一不可**：只改顺序不改元组，
+    第二次启动崩；只改元组不改顺序，升级那一次崩。
+
+    另两条软约束（排错不报错，但顺序是错的）：_migrate_users_contact 历史上读过
+    这张表（回填，Spec23 已删）、_migrate_drop_phone_and_ip 会对它做 PRAGMA
+    （对不存在的表返回空集，无害）。
+
+    幂等：第二次启动时 sqlite_master 判据为假，直接返回，不打日志。
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'register_requests'"
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute("DROP TABLE register_requests")
+    # 用 warning 而不是 info：这是本仓唯一一条"删掉了一张带数据的表"的迁移日志，
+    # 对齐 Spec22 删列那条（sqlite_too_old 用的也是 warning）。将来在日志里搜
+    # "我的申请记录呢"，这行就是答案。
+    logger.warning(
+        "register_requests 表已删除（Spec23：注册改为自助，审批台账不再产生）"
+        "——此操作不可逆，历史申请数据已永久丢失",
+        extra={"event": "db.migrate", "reason": "register_requests_dropped"},
+    )
 
 
 def _migrate_usage_style(conn: sqlite3.Connection) -> None:
@@ -849,15 +841,21 @@ def init_db() -> None:
         conn.execute(_CREATE_CHAT_MESSAGES_INDEX)
         conn.execute(_CREATE_POST_COMMENTS_TABLE)
         conn.execute(_CREATE_POST_COMMENTS_INDEX)
-        # Spec19 §5.1a：注册申请表。全新空表，CREATE TABLE IF NOT EXISTS 对新库与
-        # 存量库行为一致，**不需要**迁移函数（与 Spec18 的 _backfill_user_quota 不同，
-        # 那个要给已存在的数据补一份派生账本，这里没有已存在的数据）。
-        conn.execute(_CREATE_REGISTER_REQUESTS_TABLE)
+        # Spec19 §5.1a：注册申请表。   ← Spec23 §5.3 删除：这三行整行删掉
+        # conn.execute(_CREATE_REGISTER_REQUESTS_TABLE)
         # Spec22 §5.8 删除：conn.execute(_CREATE_REGISTER_REQUESTS_IP_INDEX)
         #   ip 列已删，留着这句每次启动都撞 "no such column: ip"，服务直接起不来（§2.1）。
-        conn.execute(_CREATE_REGISTER_REQUESTS_STATUS_INDEX)
-        # Spec21 §5.3：充值台账。与 register_requests 同类——全新空表，
-        # CREATE TABLE IF NOT EXISTS 对新库/存量库行为一致，不需要迁移函数。
+        # Spec23 删除：conn.execute(_CREATE_REGISTER_REQUESTS_STATUS_INDEX)
+        #   ⚠️ 这个**索引**那行与建表那行同样致命：CREATE INDEX ... ON register_requests
+        #      对不存在的表直接报错，服务起不来。Spec22 已经为 ip 索引踩过一次，
+        #      那条"漏删就起不来"的注释就写在它上面一行，照着同一个教训处理。
+        #   ⚠️ 也不能只把这两行留着靠后面的 DROP 收尾——那样每次启动都"建了又删"，
+        #      sqlite_master 判据永远为真、那条 warning 每次启动都打一遍（§14 陷阱 4）。
+        #   表定义常量 _CREATE_REGISTER_REQUESTS_TABLE 与
+        #   _CREATE_REGISTER_REQUESTS_STATUS_INDEX 也一并删了（§5.2）。
+        # Spec21 §5.3：充值台账。与 Spec19 的注册申请表同类（那张表 Spec23 已整表
+        # 删除，见 §2.2）——全新空表，CREATE TABLE IF NOT EXISTS 对新库/存量库
+        # 行为一致，不需要迁移函数。
         conn.execute(_CREATE_RECHARGE_REQUESTS_TABLE)
         conn.execute(_CREATE_RECHARGE_REQUESTS_USER_INDEX)
         conn.execute(_CREATE_RECHARGE_REQUESTS_STATUS_INDEX)
@@ -867,16 +865,32 @@ def init_db() -> None:
         conn.execute(_CREATE_EMAIL_VERIFICATIONS_INDEX)
         conn.execute(_CREATE_CLICK_EVENTS_TABLE)
         conn.execute(_CREATE_CLICK_EVENTS_INDEX)
-        # Spec21 §5.1：users 补 email 并回填。
-        # ⚠️ 位置约束：必须排在 _CREATE_REGISTER_REQUESTS_TABLE **之后**（回填要读它）。
+        # Spec21 §5.1：users 补 email。
+        # Spec23 §2.2：只补列、不回填了——回填源 register_requests 已经不存在。
+        # ⚠️ 位置约束（软）：历史上必须排在 _CREATE_REGISTER_REQUESTS_TABLE **之后**
+        #    （回填要读它）。回填删掉之后已无数据依赖，顺序仍然写死（§5.2）。
         _migrate_users_contact(conn)
         # Spec22 §5.1：删掉 users.phone / register_requests.phone / register_requests.ip。
         # ⚠️ 位置约束：**必须排在 _migrate_users_contact 之后**。顺序反了的话，一个
         #    pre-Spec21 的旧库会先被"无列可删"跳过、再被上面那行把 phone 加回来。
+        # Spec23 之后这张表已经不在了 → PRAGMA 返回空集 → 这段对 register_requests
+        #    自然变成无操作（users.phone 那半照常工作）。**不要**给它加"表不存在就
+        #    跳过"的判断——PRAGMA 对不存在的表返回空 list 本来就是它的行为。
         _migrate_drop_phone_and_ip(conn)
         # Spec22 §2.8：存量邮箱小写化（否则大写邮箱的账号永远登录不进去）。
         # 排在删列之后：保证**任何**读 email 的迁移都看到小写后的值。
+        # ⚠️ Spec23：它的循环元组必须从 ("users", "register_requests") 改成 ("users",)
+        #    ——见 §5.2。**这一条与下面那行的顺序是两道独立的保险，都要做。**
         _migrate_lowercase_emails(conn)
+        # Spec23 §2.2：删掉 register_requests 表。⚠️ 不可逆，回滚靠备份文件。
+        # ⚠️ 硬位置约束（排错了**服务起不来**，不是"读起来不对"）：
+        #   必须排在 _migrate_lowercase_emails **之后**——那一步会
+        #   UPDATE register_requests.email，表先没了它当场抛 no such table。
+        #   这是本 Spec 唯一一条"排错就崩"的约束（§5.3）。
+        # 两条软约束（排错不报错，但读起来是错的顺序）：
+        #   · _migrate_users_contact 历史上读过这张表（回填），Spec23 已删
+        #   · _migrate_drop_phone_and_ip 会对这张表做 PRAGMA（对不存在的表返回空集）
+        _migrate_drop_register_requests(conn)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         # Spec12 §5.1b：存量库补 images.wiki_used 列
@@ -971,21 +985,33 @@ def count_admins() -> int:
 
 def create_user(username: str, password_hash: str, is_admin: bool = False,
                 email: str | None = None) -> dict:
-    """建号。email（Spec21 §5.1 加的列）只有注册审批路径会传——
-    `POST /api/admin/users`（管理员手工建号）不传，落 NULL，前端显示「无」。
+    """建号。email（Spec21 §5.1 加的列）只有**自助注册**这条路会传（Spec23 §2.1）；
+    管理员手工建号（`POST /api/admin/users`）不传，落 NULL，前端显示「无」。
+
+    Spec21 §5.1 加 email 列时，它的唯一来源是"审批通过时把申请行的邮箱带过来"；
+    Spec23 撤销审批之后，注册路由自己建号、自己带 email——**传参的人换了，字段没变**。
 
     Spec22 §5.1：`phone` 参数**整个删掉**，不是留个默认值——留参数就是留一条
-    能写进已删列的路。"""
+    能写进已删列的路。Spec23 沿用同一条规矩：**没有 wechat 参数**。
+
+    ⚠️ Spec23 §2.4：`quota_limit` 必须**显式**出现在 INSERT 里。列上的
+    `DEFAULT {_QUOTA_DEFAULT}` 是建表那一刻烤进 schema 的字符串，对一个**已存在**
+    的库，`CREATE TABLE IF NOT EXISTS` 直接跳过，改 `QUOTA_DEFAULT_LIMIT` 对它
+    毫无影响——不显式传值，存量库上这里永远给 25，而同一台机器上的自助注册给 10，
+    同一个系统两个价，**看代码还看不出来**（代码里只有一个 `_QUOTA_DEFAULT`）。
+    """
     try:
         with _connect() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, password_hash, is_admin, created_at, email) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (username, password_hash, 1 if is_admin else 0, _now_iso(), email),
+                "INSERT INTO users (username, password_hash, is_admin, created_at, email, quota_limit) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (username, password_hash, 1 if is_admin else 0, _now_iso(), email, _QUOTA_DEFAULT),
             )
             conn.commit()
             user_id = cur.lastrowid
     except sqlite3.IntegrityError as exc:
+        # Spec23 §3.3-4：自助注册之后，这里是用户名唯一性的**唯一**原子保证
+        # （旧流程还有"管理员点同意时撞 UNIQUE"兜底，现在没有那一步了）。
         raise DuplicateUsernameError(f"用户名已存在: {username}") from exc
     return get_user_by_id(user_id)
 
@@ -1050,8 +1076,7 @@ def delete_user(user_id: int) -> bool:
     Spec17 §5.1f 顺序要求：删"该用户帖子上的他人评论"必须排在 `DELETE FROM posts`
     **之前**，否则子查询已经取不到帖子 id。
 
-    Spec21 §2.6 补充：`recharge_requests` 也在级联清单里（但 `register_requests` 不在
-    ——它是审批台账且没有 user_id，理由见 §2.6 的对照表）。
+    Spec21 §2.6 补充：`recharge_requests` 也在级联清单里（理由见 §2.6 的对照表）。
     """
     with _connect() as conn:
         # Spec18 §5.1h：只删账本行，不删 usage 的既有语句（两者都留，各自级联）
@@ -1059,7 +1084,6 @@ def delete_user(user_id: int) -> bool:
         conn.execute("DELETE FROM usage WHERE user_id = ?", (user_id,))
         # Spec21 §2.6：充值记录是该用户的业务数据，与它们同类——留一堆 user_id 指向
         # 不存在用户的挂账记录，只会让管理端列表里出现点不动的行。
-        # （register_requests 相反：它是审批台账且没有 user_id，删号不动它。）
         conn.execute("DELETE FROM recharge_requests WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM images WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM post_votes WHERE user_id = ?", (user_id,))
@@ -1932,152 +1956,6 @@ def delete_comment(comment_id: int) -> None:
         conn.commit()
 
 
-# ---------- 注册申请与审批（Spec19 §5.1d）----------
-
-def create_register_request(username: str, password_hash: str,
-                            email: str | None, wechat: str) -> dict:
-    """插入一条 pending 申请，返回完整记录（**不含** password_hash）。
-
-    Spec22 §5.1：`phone` / `ip` 两个参数**整个删掉**（调用方也不再算 ip）——
-    留参数就是留一条能写进已删列的路。防重改由邮箱验证码承担（§2.5）。
-    """
-    with _connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO register_requests "
-            "(username, password_hash, email, wechat, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?)",
-            (username, password_hash, email, wechat, _now_iso()),
-        )
-        conn.commit()
-        request_id = cur.lastrowid
-    return get_register_request(request_id)
-
-
-def get_register_request(request_id: int, *, with_secret: bool = False) -> dict | None:
-    """按 id 取申请；不存在返回 None。"""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM register_requests WHERE id = ?", (request_id,)
-        ).fetchone()
-    return _register_row_to_dict(row, with_secret=with_secret)
-
-
-def list_register_requests() -> list[dict]:
-    """全部申请：**pending 优先**，组内 id 倒序（最新在前）。不含 password_hash。
-
-    排序写成 `ORDER BY (status = 'pending') DESC, id DESC`：
-    SQLite 里布尔表达式求值为 0/1，所以"是 pending 的排前面"是一行 SQL 的事。
-    已处理的记录按时间倒序跟在后面——它们是台账，不是待办。
-    """
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM register_requests "
-            "ORDER BY (status = 'pending') DESC, id DESC"
-        ).fetchall()
-    return [_register_row_to_dict(r) for r in rows]
-
-
-def find_pending_register_by_email(email: str) -> dict | None:
-    """该邮箱是否已有一条**待审批**申请；有则返回那一行，没有则 None。
-
-    Spec22 §2.4 新增的判据：删掉 IP 冷却之后，"同一邮箱反复提交、你反复收到
-    同一份审批邮件"就只剩这一道闸门。**只看 pending**——已同意/已拒绝的历史行
-    不该挡住新的申请（Spec19 §2.2：被拒了可以再申请，那正是台账要保留的东西）。
-
-    §5.5 的函数清单里漏了这一个（清单只列了 `get_user_by_email` 与四个新表的
-    函数），但 §6.2 第 5 条的 pending 分支必须有它——以 §2.4 / §6.2 为准。
-
-    email 由路由层小写化后传入（§2.8），这里不做隐式转换。
-    """
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM register_requests "
-            "WHERE email = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
-            (email,),
-        ).fetchone()
-    return _register_row_to_dict(row)
-
-
-# Spec22 §5.5 删除：find_recent_register_by_ip(ip, window_seconds)
-#   它的唯一消费者是"同一 IP 24 小时一次"的注册冷却（Spec19 §2.2），
-#   需求 3 把那条限制整个删掉了。防重改由邮箱验证码承担。
-#   注意 auth.client_ip 仍在——它还有登录限速与点击埋点两个消费者（§2.11）。
-
-
-def approve_register_request(request_id: int, quota_limit: int) -> dict | None:
-    """同意：**单事务**内建号 + 改状态 + 置空哈希。返回新建的用户 dict；
-    该行已不是 pending（并发抢跑）时返回 None（调用方转 40903）。
-    用户名撞 UNIQUE 时抛 DuplicateUsernameError（调用方转 40901）。
-
-    为什么必须一个事务：若先 create_user() 提交、再单独改状态，中间会开出一个
-    "号已经建了，但申请记录还是 pending"的窗口。管理员此时再点一次「同意」→ 撞
-    `40901 用户名已存在` → 那条记录永远停在 pending、永远点不动。这与 Spec18
-    §5.1g「record_call 必须一次事务写两张表」是同一类错误：跨表的状态必须同生同死。
-
-    quota_limit 直接写在 INSERT 里，而不是建完号再调 set_user_quota：后者是第二次
-    事务，同样会开出"号建了但限额还是默认值"的窗口。users.quota_limit 本来就有列
-    默认值（QUOTA_DEFAULT_LIMIT），显式传值只是覆盖它——一条语句解决。
-
-    user_quota 行不用建：_USER_SELECT 用 LEFT JOIN + COALESCE(q.used, 0)，
-    没有 quota 行等价于"已用 0 次"。新建的号由第一次 record_call 的 UPSERT 建行
-    ——与既有的 create_user 行为完全一致，不引入第二条路径。
-    """
-    req = get_register_request(request_id, with_secret=True)
-    if req is None:
-        return None
-    now = _now_iso()
-    try:
-        with _connect() as conn:
-            # Spec21 §5.1 / Spec22 §5.1：联系方式（只剩 email）直接取申请行
-            # （get_register_request(with_secret=True) 已经把它带出来了）。
-            # 手工建号那条路不传，落 NULL。旧申请行的 email 可能是 NULL。
-            cur = conn.execute(
-                "INSERT INTO users "
-                "(username, password_hash, is_admin, created_at, quota_limit, email) "
-                "VALUES (?, ?, 0, ?, ?, ?)",
-                (req["username"], req["password_hash"], now, quota_limit, req["email"]),
-            )
-            user_id = cur.lastrowid
-            # 并发判据用 WHERE ... AND status='pending' 的 rowcount，而不是"先查后写"：
-            # 两个管理员同时点同意时，后到的那个 UPDATE 影响 0 行 → 整个事务回滚。
-            marked = conn.execute(
-                "UPDATE register_requests "
-                "SET status = 'approved', reviewed_at = ?, password_hash = '' "
-                "WHERE id = ? AND status = 'pending'",
-                (now, request_id),
-            )
-            if marked.rowcount == 0:
-                conn.rollback()
-                return None
-            conn.commit()
-    except sqlite3.IntegrityError as exc:      # users.username UNIQUE 撞车
-        raise DuplicateUsernameError(f"用户名已存在: {req['username']}") from exc
-    return get_user_by_id(user_id)
-
-
-def reject_register_request(request_id: int) -> dict | None:
-    """拒绝：只改状态。**保留 password_hash**（该密码从未生效，见 §3.3-5）。
-    该行已不是 pending 时返回 None。"""
-    with _connect() as conn:
-        cur = conn.execute(
-            "UPDATE register_requests SET status = 'rejected', reviewed_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (_now_iso(), request_id),
-        )
-        conn.commit()
-        if cur.rowcount == 0:
-            return None
-    return get_register_request(request_id)
-
-
-def delete_register_request(request_id: int) -> bool:
-    """删掉一条申请记录（任意状态）。**不触碰 users**（§5.3）。返回是否有行被删。"""
-    with _connect() as conn:
-        cur = conn.execute("DELETE FROM register_requests WHERE id = ?", (request_id,))
-        conn.commit()
-    return cur.rowcount > 0
-
-
 # ---------- 余额与充值（Spec21 §5.4）----------
 
 def create_recharge_request(user_id: int, username: str, wechat: str, source: str) -> dict:
@@ -2148,7 +2026,8 @@ def find_recent_recharge_by_user(user_id: int, window_seconds: int) -> dict | No
 def list_recharge_requests() -> list[dict]:
     """全部充值记录：**pending 优先**，组内 id 倒序（最新在前）。
 
-    排序写法与 list_register_requests 同款：SQLite 里布尔表达式求值为 0/1。
+    排序写成 `ORDER BY (status = 'pending') DESC, id DESC`：
+    SQLite 里布尔表达式求值为 0/1。
     已处理的记录按时间倒序跟在后面——它们是台账，不是待办。
     """
     with _connect() as conn:

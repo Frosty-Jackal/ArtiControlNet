@@ -186,52 +186,34 @@ export async function deleteUser(userId) {
   return data.data // { id }
 }
 
-// ---- 注册申请与审批（Spec19 §7.6）----
+// ---- 自助注册（Spec23 §7.3）----
+// Spec23：注册不再是"提交申请 → 等管理员审批"，而是"验证码通过 → 当场建号 + 登录"。
+// 原来那套「注册申请与审批」的注释与四条管理端函数一并删掉（§6.2 那四条路由没了）。
+//
 // 注意：拦截器不用改。40305（注册未开放）与既有的 40301/40302/40303/40304 互不
 // 干扰——拦截器只在 code === 40304 时才登出，而 40305 只可能出现在
-// /api/auth/register 上（一个未登录用户根本不会被登出）。40902/40903 是 409，
-// 拦截器不处理 409。
+// /api/auth/register 上（一个未登录用户根本不会被登出）。40907 是 409，拦截器不处理。
 
 export async function getRegisterConfig() {
   const { data } = await http.get('/api/auth/register-config')
-  // { enabled, contact_email, qr_url, price_notice, daily_notice }
+  // Spec23：price_notice(str) → price_line(片段数组)，见 §6.3
+  // { enabled, contact_email, qr_url, price_line }
   return data.data
 }
 
-// Spec19 §7.6 的签名（Spec22 §6.1 改造）
-// 原：submitRegisterRequest({ username, password, phone, email, wechat })
-// 新：phone 删除，新增 code（**没有 confirm** —— 它不提交，§2.10）
-export async function submitRegisterRequest({ username, password, email, code, wechat }) {
+// Spec23 §2.5：注册 = 建号 + 登录，一次调用。
+// 原（Spec19）：submitRegisterRequest({ username, password, phone, email, wechat }) → { id }
+// 新（Spec23）：wechat 删除（表单里也没有了）；**没有 confirm**（它不提交，Spec22 §2.10）
+export async function submitRegisterRequest({ username, password, email, code }) {
   const { data } = await http.post('/api/auth/register', {
-    username, password, email, code, wechat
+    username, password, email, code
   })
-  return data.data // { id }
+  return data.data // { token, username, is_admin } —— 与 /api/auth/login 同形
 }
 
-export async function listRegisterRequests() {
-  const { data } = await http.get('/api/admin/register-requests')
-  // [{ id, username, email, wechat, status, created_at, reviewed_at }]
-  // pending 优先、组内 id 倒序；**无** password_hash / ip（Spec19 §6.4）；
-  // Spec22 §5.5 起 phone 已从库里删掉。
-  return data.data
-}
-
-export async function approveRegisterRequest(id, quotaLimit) {
-  const { data } = await http.post(`/api/admin/register-requests/${id}/approve`, {
-    quota_limit: quotaLimit
-  })
-  return data.data // { id, username, is_admin, quota_limit }
-}
-
-export async function rejectRegisterRequest(id) {
-  const { data } = await http.post(`/api/admin/register-requests/${id}/reject`)
-  return data.data // { id }
-}
-
-export async function deleteRegisterRequest(id) {
-  const { data } = await http.delete(`/api/admin/register-requests/${id}`)
-  return data.data // { id }
-}
+// Spec23 删除：listRegisterRequests / approveRegisterRequest /
+//              rejectRegisterRequest / deleteRegisterRequest
+//   四条管理端路由整个删了（§6.2）。管理端「待审批注册用户」那块 UI 也没了。
 
 // ---- 邮箱验证码（Spec22 §6.2~§6.5）----
 // 拦截器不用改（§7.9）：这批路由的失败码是 40020 / 40906 / 40907 / 50302，
@@ -273,7 +255,7 @@ export async function clearClicksApi() {
 
 export async function getRechargeInfo() {
   const { data } = await http.get('/api/recharge/info')
-  // { balance, quota_limit, used, qr_url, price_notice }
+  // { balance, quota_limit, used, qr_url, price_line }   ← Spec23 §7.3
   return data.data
 }
 

@@ -25,13 +25,17 @@ class JsonFormatter(logging.Formatter):
                "upload_analyzed", "upload_failed", "affected",
                # Spec18 服务限额事件字段（auth.quota_blocked / auth.admin.set_quota）
                "used", "quota_limit", "path",
-               # Spec19 注册申请与审批事件字段。注意这里用 register_id 而不是
-               # Spec19 §10 表里写的 request_id：后者在本仓已经是"HTTP X-Request-Id"
-               # 的固定含义（每个路由的每行日志都带它），两者同名会让排查时
-               # 拿 request_id 一搜就串味。注册申请 id 一律叫 register_id。
-               # Spec22 删除："has_phone" —— 注册表单已经没有任何电话字段了，
-               #   留着它就是一个永远不会被传进来的白名单项。
-               "register_id", "has_email",
+               # Spec23 §10.1 删除："register_id" 与 "has_email"。
+               #   前者的四个生产者全部消失（注册路由 / 三条审批路由 / 那封被删的
+               #   注册成功邮件）；"has_email" 的唯一生产者是注册路由那条日志，
+               #   而它现在永远为 True（Spec22 起邮箱必填），是个常量字段。
+               #   （Spec22 已先删过 "has_phone"。）
+               #   ⚠️ 本条是**第四次**动这个白名单，但前三次都是"忘了加"，
+               #   这次是"该删" —— 别把这两件事混了：删掉一个**没有生产者**的键
+               #   是安全的，而漏加一个有生产者的键是静默丢字段。
+               #   ⚠️ 只删这两个：下面的 "decision" / "was_status" 是 Spec21 充值
+               #   审批（reject）在用的；"recharge_id" 是充值链条在用的；"user_id"
+               #   是 Spec12 wiki 事件在用的——都不动。
                "decision", "was_status",
                # Spec20 注册申请邮件通知事件字段（notify.register_mail_*）。
                # 注意 "error" 不是新概念：main.py / task_queue.py 里早有同名的

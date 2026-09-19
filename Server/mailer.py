@@ -1,10 +1,16 @@
-"""注册申请 / 充值申请邮件通知（Spec20、Spec21 §5.5）+ 邮箱验证码与审批结果通知（Spec22）。
+"""注册 / 充值通知（Spec20、Spec21 §5.5）+ 邮箱验证码与充值到账通知（Spec22）。
 
 一个同步阻塞模块：由 FastAPI BackgroundTasks 丢进线程池执行，
 **永不抛异常**——邮件是尽力而为的通知，不能反过来影响注册 / 充值。
 
-Spec22 起收件人分两类：前三个函数发给**你自己**（config.*_NOTIFY_TO，日志里可以带
-`to`），后三个发给**用户本人**（日志里**不带** `to`，那是 PII）。
+收件人分两类，**两类各自的性质不同**：
+  · 发给**你自己**（config.*_NOTIFY_TO，日志里可以带 `to`——那是固定配置值）：
+    send_register_notification / send_recharge_notification
+  · 发给**用户本人**（日志里**不带** `to`，那是 PII）：
+    send_email_code / send_recharge_approved_notification
+
+Spec23 §2.6 删除：send_register_approved_notification —— 它挂在被删的
+注册审批路由上，于是"发给用户本人"的那一类少了一个（3 → 2）。
 
 时间格式化已搬到 timefmt.py（Spec21 §5.2）；本模块只是把它重新导出，
 `mailer.beijing_time_text(...)` 依然可调用（Spec20 §13 的验收命令逐字照旧）。
@@ -22,25 +28,31 @@ logger = logging.getLogger("mailer")
 _FROM_NAME = "ArtiControlNet"
 
 
-def send_register_notification(username: str, contact: str, wechat: str,
-                               created_at_iso: str) -> None:
-    """发一封"有新注册申请"的提醒。**同步阻塞**，调用方负责丢进线程池（Spec20 §2.1）。
+def send_register_notification(username: str, contact: str, created_at_iso: str) -> None:
+    """发一封"有新用户注册"的提醒。**同步阻塞**，调用方负责丢进线程池（Spec20 §2.1）。
 
     三种结局，全部静默（Spec20 §2.4）：
       未配置 SMTP_PASSWORD → warning 日志，直接返回
       发送成功             → info 日志
       发送失败             → warning 日志（异常被吞掉，绝不冒泡到注册请求上）
 
-    日志里**不带**用户手机号 / 邮箱 / IP（Spec20 §10）：前两者是申请人的 PII 且已在
-    邮件正文里，IP 是 Spec19 §10 定的"任何日志都不带"。`to` 是配置里的固定值，可以记。
-
-    Spec21 §2.7：正文前面加了「微信充值账号是<昵称>，」；「注册时间是」这个措辞
-    **保留**（用户只要求"前面加一句"，改一个没被要求的词会让 Spec20 的验收用例
-    与邮件历史对不上）。于是三封邮件的句式并不完全一致——**有意照抄用户原话**。
+    日志里**不带**用户邮箱 / IP（Spec20 §10）：邮箱是注册人的 PII 且已在邮件正文里，
+    IP 是 Spec19 §10 定的"任何日志都不带"。`to` 是配置里的固定值，可以记。
 
     ⚠️ 本函数必须保持为**同步 def**。改成 async def 会让 Starlette 在事件循环里
     直接 await 它，smtplib 的阻塞 IO 会卡死整个循环（所有并发请求一起等），
     而且**不报错、只是变慢**——最难查的那类劣化。同步 def 才会被丢进 threadpool。
+
+    Spec23 §2.6 的两处改动：
+      · 签名少一个 `wechat`（Spec21 §2.7 加的那个）。微信昵称不再是注册信息——
+        注册与对账从此刻起完全无关（它只对充值有效）。**删参数不是留默认值**：
+        留参数就是留一条能写进已删概念的路（Spec22 §5.1 为 `phone` 记过同一条）。
+      · 正文重写——旧正文「微信充值账号是{wechat}，注册时间是{...}，请立即审批！」
+        里的三个词全废：微信昵称没了、「请立即审批」没有审批了（Spec23 §2.2 撤了
+        整条审批链路），只有"注册时间"这个措辞留下来。
+    ⚠️ 新正文是 **Spec23 拟的，用户没给原文**（§2.6 已记录，同 §3.3-9）。
+    主题 `ACN-{username}-{contact}` **不变**——它本来就没有微信昵称，
+    也不变意味着 Spec20 §13 里那条 grep 主题的验收命令仍然有效。
     """
     if not config.SMTP_PASSWORD:
         logger.warning("注册通知未发送：SMTP 未配置", extra={
@@ -55,7 +67,8 @@ def send_register_notification(username: str, contact: str, wechat: str,
     msg["From"] = formataddr((_FROM_NAME, config.SMTP_USER))
     msg["To"] = config.REGISTER_NOTIFY_TO
     msg.set_content(
-        f"微信充值账号是{wechat}，注册时间是{beijing_time_text(created_at_iso)}，请立即审批！"
+        f"新用户{username}已完成注册，邮箱是{contact}，"
+        f"注册时间是{beijing_time_text(created_at_iso)}。"
     )
 
     try:
@@ -243,49 +256,14 @@ def send_recharge_approved_notification(username: str, to_email: str,
     })
 
 
-def send_register_approved_notification(username: str, to_email: str,
-                                        created_at_iso: str, register_id: int) -> None:
-    """注册审批通过 → 通知**该注册者**（Spec22 §5.6 / §2.12）。**同步阻塞**。
-
-    只有**一个**变体（不像充值那封要按 source 分流）——注册审批没有"欠费"这种形态。
-    正文里的时间是**申请时间**（申请行的 created_at → 北京时间），不是审批时刻。
-
-    ⚠️ 正文开头**没有**「ArtiControlNet的用户您好」（充值那两封有）：用户给的原文
-    就是「您于…」，照抄，别顺手补上称呼。
-    ⚠️ 主题拼写是 **ControlNet**（§0 第 8-a 条），不是 ConrtolNet。
-    ⚠️ `register_id` 的理由同上一封（§10 字段表 / §13 用例 15）。
-
-    没有邮箱时（Spec22 之前提交的、只留了手机号的 pending 旧行）→
-    跳过发信 + `reason=no_email`，**号照建**。
-    """
-    if not config.SMTP_PASSWORD:
-        logger.warning("注册成功通知未发送：SMTP 未配置", extra={
-            "event": "notify.register_approved_mail_skipped",
-            "reason": "smtp_not_configured", "username": username,
-            "register_id": register_id,
-        })
-        return
-    if not to_email:
-        logger.warning("注册成功通知未发送：该申请没有邮箱", extra={
-            "event": "notify.register_approved_mail_skipped",
-            "reason": "no_email", "username": username,
-            "register_id": register_id,
-        })
-        return
-
-    try:
-        _send(to_email, "ArtiControlNet-注册成功",
-              f"您于{beijing_time_text(created_at_iso)}申请的注册已通过，"
-              f"您现在可以开始享用ArtiControlNet啦！")
-    except Exception as exc:  # 故意吞掉一切（Spec20 §2.4）
-        logger.warning("注册成功通知发送失败", extra={
-            "event": "notify.register_approved_mail_failed",
-            "username": username, "register_id": register_id,
-            "error": f"{type(exc).__name__}: {exc}",
-        })
-        return
-
-    logger.info("注册成功通知已发送", extra={
-        "event": "notify.register_approved_mail_sent",
-        "username": username, "register_id": register_id,
-    })
+# Spec23 §2.6 删除：send_register_approved_notification(username, to_email,
+#   created_at_iso, register_id)
+#   它的唯一挂点是 POST /api/admin/register-requests/{id}/approve，那条路由整个删了
+#   （§2.2）。**不是**把它改挂到注册路由上——那等于给每个注册的人发一封"你注册
+#   成功了"的邮件，而他人就在页面上看着成功提示（用户在多选里也没勾它）。
+#   ⚠️ 连带：它用的 register_id 日志字段已从 _FIELDS 白名单里删掉（§10.1）；
+#      它引用的 timefmt.beijing_time_text 仍有其它消费者，**不动**。
+#   Spec20/21/22 三封发给**用户本人**的邮件因此变成两封（充值已到账 / 账号已恢复）。
+#
+#   于是本模块现在剩五个公开函数：三个发给**你自己**（含上面的注册通知、
+#   下面两个充值通知），两个发给**用户本人**（充值审批的两个变体 + 验证码）。

@@ -52,7 +52,10 @@
     </div>
 
     <!-- Spec19 §7.3：注册申请弹窗 -->
-    <RegisterModal v-if="showRegister" :config="regCfg" @close="showRegister = false" />
+    <!-- Spec23：不再传 config —— 注册弹窗里的收款码与预充值提示都删了，
+         它是 config 的唯一消费者。regCfg 本身**保留**：enabled 决定注册按钮
+         画不画、contact_email 是下面那行客服。 -->
+    <RegisterModal v-if="showRegister" @close="showRegister = false" />
 
     <!-- Spec22 §7.3：邮箱登录 / 修改密码（一个组件两种模式，照 RechargeModal 的先例） -->
     <EmailAuthModal v-if="emailAuth" :mode="emailAuth"

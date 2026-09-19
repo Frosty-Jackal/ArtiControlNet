@@ -3,12 +3,13 @@
     <div class="help-card" role="dialog" aria-modal="true" aria-label="使用帮助">
       <button class="help-close" title="关闭" @click="close">×</button>
 
-      <h2 class="help-title">认识 ArtiControlNet</h2>
-      <p class="help-lead">赋能设计的 AIGC 系统——你说想法，它出图。</p>
+      <!-- Spec23 §7.4：标题换掉，副标题（.help-lead）整行删除。
+           ⚠️ 用户原文「快速上手ArtiControlNet」中间**没有空格**，照抄。 -->
+      <h2 class="help-title">快速上手ArtiControlNet</h2>
 
       <div class="help-item">
         <p class="help-item-title">🎨 文生图</p>
-        <p class="help-item-desc">没有参考图？直接描述想要的画面，它生成一张新图。</p>
+        <p class="help-item-desc">直接描述想要的画面，它生成一张新图。</p>
         <p class="help-example">
           <span class="help-example-label">照着说</span>
           <code class="help-code">做一张赛博朋克风的新年海报</code>
@@ -17,7 +18,9 @@
 
       <div class="help-item">
         <p class="help-item-title">🖌 图文生图</p>
-        <p class="help-item-desc">文字 + 参考图。把设计线稿传上来，按你的要求上色、上风格。</p>
+        <!-- Spec23 §7.4：「例如，」加在**「把设计线稿传上来」前面**，
+             不是加在「文字 + 参考图。」前面——前缀保留。 -->
+        <p class="help-item-desc">文字 + 参考图。例如，把设计线稿传上来，按你的要求上色、上风格。</p>
         <p class="help-example">
           <span class="help-example-label">照着说</span>
           <code class="help-code">按这张线稿上色，日系动漫风</code>
@@ -33,19 +36,22 @@
         </p>
       </div>
 
-      <p class="help-explore">✨ 以上三种只是基础玩法，更多神奇进阶功能，等你自己探索。</p>
+      <p class="help-explore">以上三种只是基础玩法，更多神奇进阶功能，等你自己探索。</p>
 
-      <!-- Spec18 §7.7：服务次数说明（Spec21 §7.5 改文案：两句删、一句换；
-           后来再次改口——不再提「联系管理员续费」，因为现在用户自己能充值） -->
+      <!-- Spec18 §7.7：收费政策说明。
+           Spec21 §7.5 改过一次（删两句、换一句：不再提「联系管理员续费」）；
+           Spec23 §7.4 再改一次——前半句换成「新注册用户会收到一定的免费试用额度，」，
+           因为现在真的有免费额度了。后半句一个字没动。
+           ⚠️ 「一定的」是**模糊词，故意的**：它不与 QUOTA_DEFAULT_LIMIT 绑定，
+              改那个数不用改这里（§3.3-7）——别把它"写具体"成「10 次」。 -->
       <div class="help-item">
-        <p class="help-item-title">📊 服务次数</p>
+        <p class="help-item-title">💰 收费政策</p>
         <p class="help-item-desc">
-          每个用户在充值后会获得对应次数，用尽后需充值才能继续使用噢！
+          新注册用户会收到一定的免费试用额度，用尽后需充值才能继续使用噢！
         </p>
       </div>
 
       <div class="help-foot">
-        <p class="help-tip">支持 jpg / png / webp / gif，≤10MB。每条消息都能带图。</p>
         <button class="btn-primary help-start" @click="close">开始使用</button>
       </div>
     </div>
@@ -128,20 +134,15 @@ onBeforeUnmount(() => {
   font-weight: 700;
   letter-spacing: 0.5px;
   text-align: center;
-  margin-bottom: 8px;
+  margin-bottom: 20px; /* Spec23：原 .help-lead 的间距挪到这里（副标题已删） */
   background: linear-gradient(135deg, var(--purple-300), var(--purple-500));
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.help-lead {
-  text-align: center;
-  font-size: 13px;
-  color: var(--text-muted);
-  line-height: 1.7;
-  margin-bottom: 20px;
-}
+/* Spec23 删除：.help-lead —— 副标题整行删掉了，这条规则没有消费者。
+   它原来的 margin-bottom: 20px 已挪给 .help-title（上面）。 */
 
 .help-item {
   background: var(--bg-input);
@@ -206,17 +207,13 @@ onBeforeUnmount(() => {
 .help-foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center; /* Spec23：只剩一个按钮，space-between 会把它顶到左边 */
   gap: 12px;
   border-top: 1px solid var(--border-color);
   padding-top: 16px;
 }
 
-.help-tip {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.6;
-}
+/* Spec23 删除：.help-tip —— 上传格式那行删掉了 */
 
 .help-start {
   flex-shrink: 0;
@@ -226,10 +223,7 @@ onBeforeUnmount(() => {
   .help-card {
     padding: 22px 18px 18px;
   }
-  .help-foot {
-    flex-direction: column;
-    align-items: stretch;
-    text-align: center;
-  }
+  /* Spec23 删除：这里原本还有一条 .help-foot 的列布局——
+     只剩一个按钮，不再需要。**整块 @media 留着**，上面那条还有用。 */
 }
 </style>

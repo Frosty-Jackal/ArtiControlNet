@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import {
-  clearToken, getToken, login as apiLogin, loginByEmailApi, me as apiMe
+  clearToken, getToken, login as apiLogin, loginByEmailApi, me as apiMe,
+  submitRegisterRequest as apiRegister
 } from '../api/chatApi'
 import { setQuotaNotice } from '../utils/quotaNotice'
 
@@ -53,6 +54,22 @@ export const useAuthStore = defineStore('auth', {
     // 的那一行 `overdraft.value = {...}`）挂——这里**不另写一套**。
     async loginByEmail(email, code) {
       const res = await loginByEmailApi(email, code)
+      this.token = res.token
+      this.username = res.username
+      this.isAdmin = res.is_admin
+      localStorage.setItem(TOKEN_KEY, res.token)
+    },
+
+    // Spec23 §2.5：自助注册。后端在同一次响应里签发 token，所以收尾三行与
+    // login() / loginByEmail() **逐字相同**——三个一落，App.vue 的 v-if 自动切视图。
+    //
+    // 与 login() 的处境差别只有一个：这里**不会**遇到 40304（新号刚拿到 10 次额度，
+    // 不可能超额），所以不需要调用方挂欠费面板。
+    //
+    // 连带的好处（§2.5）：username 变化会触发 App.vue 那个 watcher，于是"首次登录
+    // 自动弹帮助"对刚注册的人也自动生效——他刚读完改过文案的那一份帮助。
+    async register(username, password, email, code) {
+      const res = await apiRegister({ username, password, email, code })
       this.token = res.token
       this.username = res.username
       this.isAdmin = res.is_admin

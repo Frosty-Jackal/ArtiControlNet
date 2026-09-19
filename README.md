@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <!-- Spec19：官方网址横条 → 官网首页；比下面的购买按钮更宽更醒目 -->
+  <!-- Spec19：官方网址横条 → 官网首页；比下面的注册按钮更宽更醒目 -->
   <a href="http://ArtiControlNet.fun">
     <img src="./GithubPage/assets/site-banner.svg" width="680" alt="官方网址 ArtiControlNet.fun">
   </a>
@@ -28,7 +28,7 @@
   <!-- Spec19：改为直达官网注册页（登录页 ?register=1 会自动弹开注册窗）。
        注意是 http 不是 https——站点没有证书，https 会先报证书错误再跳转，很难看。 -->
   <a href="http://ArtiControlNet.fun/?register=1">
-    <img src="./GithubPage/assets/btn-buy.png" width="320" alt="购买 ArtiControlNet">
+    <img src="./GithubPage/assets/btn-buy.png" width="320" alt="注册 ArtiControlNet 账号">
   </a>
   <br><br>
   <a href="https://github.com/Frosty-Jackal/ArtiControlNet">
@@ -92,7 +92,7 @@ ArtiControlNet 可帮你建立一份专属 **「风格档案」**。你上传或
 <details>
 <summary><b>收费吗？</b></summary>
 
-每个账号都有一定次数免费额度，用完后需要联系管理员按量付费噢（管理员邮箱 frostyj@qq.com）。
+每个账号都有一定次数免费额度，用完后需要在系统里充值噢。
 </details>
 
 <details>
@@ -183,9 +183,55 @@ cd Server
 > 链接是**临时**的：每次重启隧道会变化；你的电脑需保持开机、两个终端都别关。
 > 本机受 Clash / Mihomo 等代理影响，自己浏览器打开可能不稳，建议用手机流量测试或直接让访客访问。
 
-需要**永久**域名 / 正式部署（Render、云服务器）时，另行配置，见 [Spec.md](./specs/Spec.md)。
+需要**永久**域名 / 正式部署（Render、云服务器）时，见下一节。
 
-### 四、只有改前端代码时才需要碰（平时请跳过）
+### 四、部署到云服务器（正式环境，80 端口）
+
+以 Ubuntu / Debian 云服务器为例，项目放在 `/root/ArtiControlNet`，直接监听 **80 端口**。
+
+**首次部署**
+
+```bash
+# 1. 装依赖
+apt update && apt install -y git python3 python3-venv
+
+# 2. 拉代码
+cd /root && git clone https://github.com/Frosty-Jackal/ArtiControlNet.git
+
+# 3. 后端依赖 + 密钥
+cd /root/ArtiControlNet/Server
+python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env && vim .env      # 填 API 密钥与 JWT_SECRET，见「七、注意事项」
+
+# 4. 启动（前台运行，Ctrl+C 停止）
+.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 80
+```
+
+启动后直接用服务器公网 IP 访问即可 —— 前端页面和后端接口都由这一个进程提供。
+
+**日常更新版本**（前提：没在服务器上改过代码）
+
+```bash
+cd /root/ArtiControlNet && git pull
+
+pkill -f "uvicorn main:app"           # 80 端口被占，不杀起不来；没退出就 kill -9
+
+cd /root/ArtiControlNet/Server
+nohup .venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 80 > /root/artcn.log 2>&1 &
+tail -f /root/artcn.log               # 看到启动完成、无报错即可
+```
+
+**要点**
+
+- **前端产物已提交在 `Server/static/`**，云上 `git pull` 即生效，**不需要 npm / 不需要重新构建**（只有你自己改了前端源码才需要，见第五节）。
+- 监听 80 需要 root 权限：**以 root 登录**则上面的命令直接跑，不用加 `sudo`；普通用户登录要先 `sudo -i`。
+- `Server/.env`、`Server/artcn.db`、`Server/payment.jpg` 都在 `.gitignore` 里，`git pull` **不会**覆盖它们；数据库建表 / 加列在启动时自动完成，不用手动迁移。
+- 更新**改过数据库结构**的版本前，先备份：`cp Server/artcn.db Server/artcn.db.bak-$(date +%F)`。
+- **千万别在服务器上跑 `git clean -fdx` 或 `git reset --hard`** —— 会把未跟踪的 `.env`、数据库、收款码一并删掉。
+- 云服务器安全组要**放行 80 端口**，否则公网访问不通。
+- 想把服务做成开机自启 / 后台常驻，用 `systemd` 或 `tmux`；上面给的是最省事的 `nohup` 版本。
+
+### 五、只有改前端代码时才需要碰（平时请跳过）
 
 ```bash
 # 场景 A：改了前端代码，要让改动生效
@@ -211,7 +257,7 @@ cd frontend
 npm run dev
 ```
 
-### 五、结束程序
+### 六、结束程序
 
 前台运行的窗口按 **Ctrl+C** 即可停止；**直接关掉窗口也可以** —— 关闭控制台窗口会终止其中运行的进程。
 
@@ -227,7 +273,7 @@ netstat -ano | findstr :8000    # 记下最后一行的 PID
 taskkill /F /PID <PID>
 ```
 
-### 六、注意事项
+### 七、注意事项
 
 - 图片临时存放于 `Server/storage/`（TTL 1h，服务启动时清空）；多轮看图上下文存在后端内存中，重启即失。
 - `API's Usage/`、`Server/.env`、`Server/storage/` 均已 gitignore，不要手动加入提交。

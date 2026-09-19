@@ -99,7 +99,18 @@ REGISTER_ENABLED = os.getenv("REGISTER_ENABLED", "true").strip().lower() not in 
 PAYMENT_QR_PATH = BASE_DIR / "payment.jpg"
 
 # 给用户看的提示语（唯一来源，前端零副本——与 QUOTA_EXCEEDED_MESSAGE 同一原则）
-REGISTER_PRICE_NOTICE = "请先预充值，0.9 元起充，参考价格：0.9 元约 10 次设计服务"
+#
+# Spec23 §2.8 删除：REGISTER_PRICE_NOTICE，改成下面的 REGISTER_PRICE_LINE。
+#   它原来还兼着"注册弹窗里那句预充值提示"的职责，那个块整个删了（注册弹窗里
+#   的收款码与预充值提示都随自助注册一起消失）。现在它只服务**欠费充值面板**
+#   （登录页被踢出来时弹的那个），文案一个字不改。
+#
+# 欠费充值面板的参考价（Spec19 §6.1 起就有的那个键，Spec23 换了形状）。
+# 单片段、无删除线——需求只要求给「余额与充值」页加划线价（§0 第 3-b 条）。
+# 与 RECHARGE_PRICE_LINE 形状一致，所以 RechargeModal 两个模式共用一份渲染。
+REGISTER_PRICE_LINE = (
+    {"text": "请先预充值，0.9 元起充，参考价格：0.9 元约 10 次设计服务"},
+)
 # Spec22 删除：REGISTER_DAILY_NOTICE
 #   原文「每人每天只能申请一个账号…」随同一条限制一起消失。
 #   连带 GET /api/auth/register-config 不再返回 daily_notice、RegisterModal 删掉那一行（§2.11）。
@@ -116,16 +127,21 @@ EMAIL_CODE_TTL_SECONDS = int(os.getenv("EMAIL_CODE_TTL_SECONDS", "600"))
 # 同一邮箱、同一场景的重发冷却（秒）。默认 60 = 1 分钟。
 EMAIL_CODE_RESEND_SECONDS = int(os.getenv("EMAIL_CODE_RESEND_SECONDS", "60"))
 
-# 四句给用户看的提示语（**唯一来源，前端零副本** —— 与 QUOTA_EXCEEDED_MESSAGE /
-# REGISTER_PRICE_NOTICE / RECHARGE_COOLDOWN_MESSAGE 同一原则）。
-# 前两句是用户逐字给的原文（含「宝子」与那个弯引号）；第三句是本 Spec 拟的
-# （用户只给了"已注册"那句，但"已提交过申请"必须另有一句，理由见 §2.4）。
+# 给用户看的提示语（**唯一来源，前端零副本** —— 与 QUOTA_EXCEEDED_MESSAGE /
+# REGISTER_PRICE_LINE / RECHARGE_COOLDOWN_MESSAGE 同一原则）。
+# Spec23 §2.7：原来这里有三句，中间那句（"已提交过申请"）随
+#   register_requests 表一起删掉了，现在只剩两句（下面这两句）。
+# 两句都是用户逐字给的原文（含「宝子」与那个弯引号）。
 # 第一句里的按钮名是「修改密码」——用户原话写的是"找回/修改密码"，而按钮已经
 # 改名（§0 第 6-a 条），指着一个不存在的按钮是错的。要改称呼只动这一行。
 EMAIL_CODE_REGISTERED_NOTICE = (
     "已注册账号{username}，请前往登录界面。忘记密码请前往登录界面“修改密码”"
 )
-EMAIL_CODE_PENDING_NOTICE = "该邮箱已提交过注册申请，请等待管理员审批"
+# Spec23 §2.7 删除：EMAIL_CODE_PENDING_NOTICE
+#   原文「该邮箱已提交过注册申请，请等待管理员审批」。它的唯一触发分支是
+#   "该邮箱已有一条 pending 注册申请"，而 register_requests 表整个删了（§2.2、§2.7）。
+#   留着一句描述不存在状态的提示语，正是本仓为 QUOTA_CONTACT_EMAIL /
+#   REGISTER_DAILY_NOTICE 记过的那类静默失败。
 EMAIL_CODE_UNREGISTERED_NOTICE = "还未注册，请宝子前往新用户注册~"
 
 # 重发冷却那句告警。**分钟数由秒数推出来**，不是另写一个 "1"
@@ -159,10 +175,24 @@ SMTP_TIMEOUT_SECONDS = int(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))
 # 本段必须排在 Spec19 注册块**之后**：RECHARGE_NOTIFY_TO 的默认值取 SUPPORT_EMAIL，
 # 而 Python 是从上往下执行的（与本文件里前两段同一个理，Spec21 §8.1）。
 #
-# 充值弹窗里那句参考价（唯一来源，前端零副本——与 REGISTER_PRICE_NOTICE 同一原则）。
+# 充值弹窗里那句参考价（唯一来源，前端零副本——与 REGISTER_PRICE_LINE 同一原则）。
 # 注意它与余额公式的口径**故意不同**：余额按 1 元 = 10 次的名义价算（用户给定，
 # Spec21 §2.9），而这句说的是实收价（0.9 元约 10 次）。两者不一致是有意的，别"统一"。
-RECHARGE_PRICE_NOTICE = "充值参考：0.9元约10次设计服务"
+#
+# Spec23 §2.8：从一整串字符串拆成"排版片段"——删除线落在**句子中间**（"0.9"紧前面），
+# 一整串字符串表达不了那个位置。strike=True 的片段前端套 <s>。
+# ⚠️ 用片段数组，**不是** v-html（那是个 XSS 面），**也不是**让前端在句子里找 "0.9"
+#    （那等于把价格复制到前端，正是本仓从 Spec18 起一直在避免的）。
+# ⚠️ "6.99" 与 "0.9" 的口径**故意不一致**（划掉的原价 vs 实收价折算的参考次数），
+#    与上面那句余额公式的立场同款——别去"统一"。
+# ⚠️ **第三个**片段以空格**开头**（" 0.9元约10次设计服务"）：那个空格替代了原来
+#    "6.99" 与 "0.9" 之间的分隔。别用 {"text": " "} 再单独做一个只有空格的片段
+#    ——那会多出一段，前端 v-for 照渲染，看起来一样但数据形状是错的。
+RECHARGE_PRICE_LINE = (
+    {"text": "充值参考："},
+    {"text": "6.99", "strike": True},
+    {"text": " 0.9元约10次设计服务"},
+)
 
 # 微信昵称的长度上限（前后端同值？**不是**——前端只拦必填，长度由后端 40019 报，
 # 与 Spec19 对手机号/邮箱的处理同一个立场：规则只有一份中文 message，在后端）。
@@ -187,8 +217,14 @@ RECHARGE_COOLDOWN_MESSAGE = (
 # （与 Spec20 的 REGISTER_NOTIFY_TO 同一个取舍）。
 RECHARGE_NOTIFY_TO = os.getenv("RECHARGE_NOTIFY_TO", SUPPORT_EMAIL).strip()
 
-# ===== 服务限额（Spec18：API 服务调用计量与用户限额）=====
-QUOTA_DEFAULT_LIMIT = int(os.getenv("QUOTA_DEFAULT_LIMIT", "25"))    # 新建用户的默认限额（累计次数）
+# ===== 服务限额（Spec18：API 服务调用计量与用户限额；Spec23 §2.3 语义升格）=====
+# Spec23 §2.3：这个数现在就是「**新用户的免费试用额度**」。它同时管三条路
+# （自助注册 / 管理员手工建号 / 新建库的列默认值）。
+# ⚠️ 它**只影响新建的账号**——存量账号（当时拿 25 的）不被追溯修改（Spec23 §2.10）。
+#    写一条"把所有人的额度刷成 10"的迁移是错的：那会让一些账号当场变超额被踢下线。
+# ⚠️ 但 `create_user` 必须**显式**把它写进 INSERT —— 列 DEFAULT 在建库那一刻就
+#    烤死在 schema 里了，改这个常量对**已存在**的库的列默认值毫无影响（Spec23 §2.4）。
+QUOTA_DEFAULT_LIMIT = int(os.getenv("QUOTA_DEFAULT_LIMIT", "10"))    # 新用户的免费试用额度（累计次数）
 QUOTA_LIMIT_MAX = int(os.getenv("QUOTA_LIMIT_MAX", "100000"))        # 管理员可设的限额上限（防误输入天文数字）
 # 超额提示语（唯一来源；前端只负责显示后端返回的 message，不做同值副本）
 #

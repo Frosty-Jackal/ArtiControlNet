@@ -109,40 +109,11 @@
       </table>
     </div>
 
-    <!-- Spec19 §7.5b：注册申请台账。pending 在前（后端已排好序），
-         已处理的原样留在下方——它们是台账，不是待办。 -->
-    <section class="reg-admin">
-      <h3 class="reg-admin-title">待审批注册用户</h3>
-      <p v-if="requests.length === 0" class="reg-admin-empty">暂无注册申请</p>
+    <!-- Spec23 §7.6 删除：Spec19 §7.5b 的「待审批注册用户」整块。
+         注册改成自助之后没有申请可审，那四条管理端路由也没了（§6.2）。
+         ⚠️ 那套 .reg-* 类名**一条 CSS 都没删** —— 下面充值那块还在用（§14 陷阱 1）。 -->
 
-      <div v-for="r in requests" :key="r.id" class="reg-row">
-        <div class="reg-row-info">
-          <span class="reg-row-user">{{ r.username }}</span>
-          <!-- Spec22 §7.7：手机号那一格整行删除（库里已经没有这一列了，§5.1）——
-               留一个永远显示「—」的格子比删掉更糟。邮箱现在是必填，只有 Spec22
-               之前的旧申请才可能是空的（那条 pending 仍能审批，只是不发信）。 -->
-          <span class="reg-row-cell">邮箱：{{ r.email || '—' }}</span>
-          <span class="reg-row-cell">支付微信：{{ r.wechat }}</span>
-          <span class="reg-row-cell reg-row-time">{{ r.created_at_beijing }}</span>
-        </div>
-
-        <div class="reg-row-actions">
-          <template v-if="r.status === 'pending'">
-            <button class="btn-mini" :disabled="busyRegId === r.id" @click="approve(r)">同意</button>
-            <button class="btn-mini" :disabled="busyRegId === r.id" @click="reject(r)">拒绝</button>
-          </template>
-          <span v-else class="reg-row-done">
-            {{ r.status === 'approved' ? '已同意' : '已拒绝' }}
-          </span>
-          <!-- 已处理的记录仍要能被清理，否则台账只进不出（§2.4） -->
-          <button class="btn-mini danger" :disabled="busyRegId === r.id" @click="removeRequest(r)">
-            删除
-          </button>
-        </div>
-      </div>
-    </section>
-
-    <!-- Spec21 §7.2：充值台账（结构照抄上面的注册申请块）。
+    <!-- Spec21 §7.2：充值台账（结构照抄上面那块已删的注册申请块）。
          同样 pending 在前、已处理的原样留在下方——它是台账，不是待办。 -->
     <section class="reg-admin">
       <h3 class="reg-admin-title">待审批充值记录</h3>
@@ -176,16 +147,12 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   approveRechargeRequest,
-  approveRegisterRequest,
   createUser,
   deleteRechargeRequest,
-  deleteRegisterRequest,
   deleteUser,
   listRechargeRequests,
-  listRegisterRequests,
   listUsers,
   rejectRechargeRequest,
-  rejectRegisterRequest,
   resetUserPassword,
   setUserAdmin,
   updateUserQuota
@@ -203,14 +170,10 @@ const notice = ref('')
 const creating = ref(false)
 const busyId = ref(null)
 
-// Spec19 §7.5b：注册申请台账（pending 在前，后端已排好序）
-const requests = ref([])
-const busyRegId = ref(null)
-const pendingCount = computed(
-  () => requests.value.filter((r) => r.status === 'pending').length
-)
+// Spec23 §7.6 删除：注册申请台账的 state（requests / busyRegId / pendingCount）
+//   与它的 loadRequests()。注册改为自助后没有申请可拉、可审、可删。
 
-// Spec21 §7.2：充值台账（同款：pending 在前，后端已排好序）
+// Spec21 §7.2：充值台账（pending 在前，后端已排好序）
 const recharges = ref([])
 const busyRechargeId = ref(null)
 const pendingRechargeCount = computed(
@@ -225,13 +188,7 @@ async function load() {
   }
 }
 
-async function loadRequests() {
-  try {
-    requests.value = await listRegisterRequests()
-  } catch (e) {
-    error.value = e.message || '加载注册申请失败'
-  }
-}
+// Spec23 §7.6 删除：loadRequests()
 
 async function loadRecharges() {
   try {
@@ -373,71 +330,9 @@ async function remove(u) {
 // （那是后端的建号默认值，没在公开配置里），写死 25 就是复制一个会漂移的常量
 // ——与 Spec18 §7.5 对 QUOTA_LIMIT_MAX 的处理同一个理由。管理员填多少由他跟
 // 用户的实际付款决定，本来就不该被一个前端默认值暗示。
-async function approve(r) {
-  // Spec22 §7.7：先说清"按下去会给申请者发一封信"这个副作用（§2.12）。
-  // ⚠️ confirm 必须在 prompt **之前**——反过来的话，管理员填完额度再点"取消 confirm"，
-  // 前面那次输入就白填了。请求逻辑一个字没动（两条 approve 路由的响应与错误码不变）。
-  if (!window.confirm(
-    `确认通过 ${r.username} 的注册申请？通过后会向 ${r.email || '（该申请没有邮箱）'} 发送一封通知邮件。`
-  )) return
-  const input = window.prompt(
-    `同意「${r.username}」的注册申请，并设置服务限额（累计可用次数）：`
-  )
-  if (input === null) return                       // 取消
-  const raw = input.trim()
-  const n = Number(raw)
-  // 与 editQuota 同样的三个坑：raw 为空必须单独拦（Number('') === 0 会让
-  // "清空直接确定"静默变成限额 0 = 禁用该账号）；用 Number.isInteger 而非
-  // parseInt（parseInt('25abc') 会静默变成 25）；上限交给后端 40017 报。
-  if (!raw || !Number.isInteger(n) || n < 0) {
-    error.value = '限额需为不小于 0 的整数'
-    return
-  }
-  error.value = ''
-  busyRegId.value = r.id
-  try {
-    await approveRegisterRequest(r.id, n)
-    flash(`已开通账号：${r.username}`)
-    // 本文件里唯一一个影响两处数据的动作：申请列表少一条待办，用户表格多一行
-    await loadRequests()
-    await load()
-  } catch (e) {
-    error.value = e.message || '审批失败'
-  } finally {
-    busyRegId.value = null
-  }
-}
-
-async function reject(r) {
-  if (!window.confirm(`确定拒绝「${r.username}」的注册申请？`)) return
-  error.value = ''
-  busyRegId.value = r.id
-  try {
-    await rejectRegisterRequest(r.id)
-    flash(`已拒绝「${r.username}」的注册申请`)
-    await loadRequests()
-  } catch (e) {
-    error.value = e.message || '操作失败'
-  } finally {
-    busyRegId.value = null
-  }
-}
-
-async function removeRequest(r) {
-  // 确认文案里**不提"账号"**：删除记录不动账号，别让管理员误会会删号
-  if (!window.confirm('确定删除这条申请记录？此操作不可撤销。')) return
-  error.value = ''
-  busyRegId.value = r.id
-  try {
-    await deleteRegisterRequest(r.id)
-    flash('已删除该条申请记录')
-    await loadRequests()
-  } catch (e) {
-    error.value = e.message || '删除失败'
-  } finally {
-    busyRegId.value = null
-  }
-}
+// Spec23 §7.6 删除：approve(r) / reject(r) / removeRequest(r) —— 注册申请的三个处理动作。
+//   注意**没有**删充值那边的 approveRecharge / rejectRecharge / removeRecharge：
+//   注册台账与充值台账是两回事，充值那套一个字没动（§3.2）。
 
 // ---- Spec21 §7.2：充值的三个处理动作 ----
 
@@ -510,10 +405,9 @@ async function removeRecharge(c) {
   }
 }
 
-// 并行拉三张表
+// 并行拉两张表（Spec23：注册申请那张随 §7.6 一起没了）
 onMounted(() => {
   load()
-  loadRequests()
   loadRecharges()
 })
 </script>

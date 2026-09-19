@@ -3,16 +3,9 @@
     <div class="reg-card" role="dialog" aria-modal="true" aria-label="新用户注册">
       <button class="reg-close" title="关闭" @click="close">×</button>
 
-      <!-- 提交成功：整卡换成结果面板，用户自己关掉（不自动关，让他看清提示） -->
-      <template v-if="done">
-        <h2 class="reg-title">申请已提交</h2>
-        <p class="reg-done-text">
-          已通知管理员，在30秒内会通过短信/邮件告知您注册结果。
-        </p>
-        <button class="btn-primary reg-submit" @click="close">关闭</button>
-      </template>
-
-      <template v-else>
+      <!-- Spec23 §7.1：结果屏整个删掉。注册成功 = 已经登录进系统了，
+           弹窗随后被父级的 v-if 卸掉，没有"让你看清提示再自己关"这一步。 -->
+      <template>
         <h2 class="reg-title">新用户注册</h2>
 
         <form class="reg-form" @submit.prevent="submit">
@@ -45,17 +38,12 @@
           <input v-model="code" class="login-input" type="text" inputmode="numeric" maxlength="4"
                  placeholder="4 位验证码" autocomplete="off" />
 
-          <div class="reg-pay">
-            <p class="reg-pay-title">{{ config.price_notice }}</p>
-            <img class="reg-qr" :src="config.qr_url" alt="收款码" />
-          </div>
-
-          <!-- 标签直接用完整的那句话（与 RechargeModal 同一次改版），占位提示随之删掉。
-               注意此处用词是「以便后台核对」，充值面板那份是「便于我们核对」——
-               两处**故意不同**，是用户分别给的原文，别顺手"统一"。 -->
-          <label class="reg-label">用于支付的微信昵称（以便后台核对） <b class="reg-star">*</b></label>
-          <input v-model="wechat" class="login-input" autocomplete="off" />
-
+          <!-- Spec23 §7.1 删除：预充值提示 + 收款码（.reg-pay 那一块）。
+               注册不再要求先付钱——新用户自带免费试用额度，用完再自助充值。
+               ⚠️ .reg-pay / .reg-qr / .reg-pay-title 三条 CSS **保留**：
+               RechargeModal 还在用它们（§7.8）。 -->
+          <!-- Spec23 §7.1 删除：微信昵称那一组（标签 + 输入框）。
+               注册与对账从此刻起完全无关——微信昵称只对充值有效（§3.3-6）。 -->
           <!-- Spec22 删除：<p class="reg-note">{{ config.daily_notice }}</p> ← 规则已不存在（§2.11） -->
           <p v-if="error" class="login-error">{{ error }}</p>
           <button class="btn-primary reg-submit" type="submit" :disabled="loading">
@@ -69,24 +57,24 @@
 
 <script setup>
 import { onBeforeUnmount, ref } from 'vue'
-import { getEmailCode, submitRegisterRequest } from '../api/chatApi'
+import { getEmailCode } from '../api/chatApi'
+import { useAuthStore } from '../store/auth'
 
-defineProps({
-  // 来自 GET /api/auth/register-config：客服邮箱与两句提示语**零副本**，
-  // 一律显示后端回传的值（与 Spec18 的 QUOTA_EXCEEDED_MESSAGE 同一原则）
-  config: { type: Object, required: true }
-})
+// Spec23 §7.1：`config` prop 整个删掉。它是 `GET /api/auth/register-config` 的
+// 唯一消费者（收款码 + 预充值提示），而那块 UI 已经没了。
+// ⚠️ Login.vue 那边 `regCfg` **仍然保留**：`enabled` 决定注册按钮画不画、
+//    `contact_email` 是登录页那行客服——只是不再往这里面传。
 const emit = defineEmits(['close'])
+
+const auth = useAuthStore()
 
 const username = ref('')
 const password = ref('')
 const confirmPassword = ref('')
 const email = ref('')
 const code = ref('')
-const wechat = ref('')
 const error = ref('')
 const loading = ref(false)
-const done = ref(false)
 
 // Spec22 §7.1：发码按钮的倒计时。**只是体验**——真正的 1 分钟冷却在后端（40906），
 // 这里的数字不参与任何判定，刷新页面就没了，这是允许的（后端才是闸门）。
@@ -95,7 +83,7 @@ const codeCooldown = ref(0)
 let cooldownTimer = null
 
 function close() {
-  // 关闭不重置 done：再来一次就重开一个组件（父级的 v-if 已经保证）
+  // 再来一次就重开一个组件（父级的 v-if 已经保证），所以这里不重置任何状态
   emit('close')
 }
 
@@ -135,9 +123,10 @@ async function submit() {
   // 只拦"必填"——那是 * 号承诺的东西，本地拦能立刻给反馈。
   // 邮箱 @ 位置、密码长度这些**不在前端复制**：它们各有自己的中文 message，
   // 已经在后端实现了一份（40018 / 40020），前端再抄一份就是第二个会漂移的副本。
-  if (!username.value.trim() || !password.value || !wechat.value.trim()) {
-    // 跟标签走：那个字段已经不叫「支付备注」了，报错文案不能还叫旧名字
-    error.value = '请填写账号、密码与微信昵称'
+  if (!username.value.trim() || !password.value) {
+    // Spec23 §7.1：那句话原来提「微信昵称」，而输入框已经删了——
+    // 提示语指向一个不存在的字段，正是 Spec22 §0 第 6-a 条记过的那类问题。
+    error.value = '请填写账号与密码'
     return
   }
   if (password.value !== confirmPassword.value) {
@@ -158,16 +147,13 @@ async function submit() {
   error.value = ''
   loading.value = true
   try {
-    await submitRegisterRequest({
-      username: username.value.trim(),
-      password: password.value,
-      email: email.value.trim(),
-      code: code.value.trim(),
-      wechat: wechat.value.trim()
-    })
-    done.value = true
+    // Spec23 §2.5：一次调用完成"建号 + 登录"。store 里 token / username / is_admin
+    // 三个一落，App.vue 的 v-if 自动切到聊天视图——**这里不需要 emit 任何东西**，
+    // 组件随后被父级的 v-if 卸掉。这正是 loginByEmail 的收尾方式，照抄。
+    await auth.register(username.value.trim(), password.value,
+                        email.value.trim(), code.value.trim())
   } catch (e) {
-    error.value = e.message || '提交失败'
+    error.value = e.message || '注册失败'
   } finally {
     loading.value = false
   }
