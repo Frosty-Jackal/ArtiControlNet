@@ -75,11 +75,13 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 AUTH_DB_PATH = BASE_DIR / "artcn.db"                  # 本地 SQLite 账号库（持久化，与 storage/ 无关）
 
 # ===== 注册申请与审批（Spec19）=====
-# 本段必须排在下面的 Spec18 限额块**之前**：QUOTA_CONTACT_EMAIL 的默认值取 SUPPORT_EMAIL，
-# 而 Python 是从上往下执行的（Spec19 §8「位置约束」）。
+# 客服 / 管理员邮箱（**唯一来源**）。注册页的客服行、每日提示，以及 Spec20 的
+# SMTP_USER / REGISTER_NOTIFY_TO、Spec21 的 RECHARGE_NOTIFY_TO 都跟随它。
 #
-# 客服 / 管理员邮箱（**唯一来源**）。Spec18 的 QUOTA_CONTACT_EMAIL 默认跟随它，
-# 于是"超额提示里的邮箱"与"注册页客服邮箱"永远是同一个地址。
+# 注意本段**曾经**必须排在 Spec18 限额块之前（那时 SPEC18 的 QUOTA_CONTACT_EMAIL
+# 取这里的 SUPPORT_EMAIL）。QUOTA_CONTACT_EMAIL 已随超额文案改版删除，那条位置
+# 约束**不再存在**——现在的约束只剩一条：Spec20 / Spec21 两段必须排在**本段之后**
+# （它们的默认值取 SUPPORT_EMAIL）。不要照旧注释里的说法去"维持"一段已经无所谓的顺序。
 SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "frostyj@qq.com").strip()
 
 # 注册申请开关：置 false 时 /api/auth/register 返回 40305，前端同时隐藏注册入口（Spec19 §3.3-7）。
@@ -96,19 +98,75 @@ REGISTER_IP_WINDOW_SECONDS = int(os.getenv("REGISTER_IP_WINDOW_SECONDS", "86400"
 PAYMENT_QR_PATH = BASE_DIR / "payment.jpg"
 
 # 两句给用户看的提示语（唯一来源，前端零副本——与 QUOTA_EXCEEDED_MESSAGE 同一原则）
-REGISTER_PRICE_NOTICE = "请先预充值，1 元起充，参考价格：1 元约 10 次设计服务"
+REGISTER_PRICE_NOTICE = "请先预充值，0.9 元起充，参考价格：0.9 元约 10 次设计服务"
 REGISTER_DAILY_NOTICE = (
     f"每人每天只能申请一个账号，若操作失误或其他需求请联系在线客服 {SUPPORT_EMAIL}"
 )
 
+# ===== 注册申请邮件通知（Spec20）=====
+# 本段必须排在 Spec19 注册块**之后**：SMTP_USER / REGISTER_NOTIFY_TO 的默认值都取
+# SUPPORT_EMAIL，而 Python 是从上往下执行的（与上面那段同一个理，Spec20 §8.1）。
+#
+# 唯一的开关是 SMTP_PASSWORD：**留空 = 完全不发信**，注册行为与 Spec19 逐字节等价。
+# 刻意不设 REGISTER_NOTIFY_ENABLED——多一个开关就多一种"配了授权码但忘了打开"的静默失败。
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))          # 465 = SMTP_SSL（不是 587 STARTTLS）
+SMTP_USER = os.getenv("SMTP_USER", SUPPORT_EMAIL).strip()
+
+# 授权码，**不是** QQ 登录密码：QQ 邮箱 → 右上角头像 → 「账号与安全」→「安全设置」
+# → 「POP3/IMAP/SMTP/...服务」→ 生成授权码。只放 .env（与 JWT_SECRET 同级处理），绝不进仓库。
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+
+# 收件人。默认跟随 SUPPORT_EMAIL，但**单独一个变量**：SUPPORT_EMAIL 是给用户看的
+# 客服邮箱，哪天换成对外公开邮箱时，通知不该跟着寄到别处（Spec20 §2.4）。
+REGISTER_NOTIFY_TO = os.getenv("REGISTER_NOTIFY_TO", SUPPORT_EMAIL).strip()
+
+# SMTP 超时（秒）。发信在线程池里跑，超时只影响那个线程，不影响注册请求（Spec20 §2.1）。
+SMTP_TIMEOUT_SECONDS = int(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))
+
+# ===== 余额与充值（Spec21）=====
+# 本段必须排在 Spec19 注册块**之后**：RECHARGE_NOTIFY_TO 的默认值取 SUPPORT_EMAIL，
+# 而 Python 是从上往下执行的（与本文件里前两段同一个理，Spec21 §8.1）。
+#
+# 充值弹窗里那句参考价（唯一来源，前端零副本——与 REGISTER_PRICE_NOTICE 同一原则）。
+# 注意它与余额公式的口径**故意不同**：余额按 1 元 = 10 次的名义价算（用户给定，
+# Spec21 §2.9），而这句说的是实收价（0.9 元约 10 次）。两者不一致是有意的，别"统一"。
+RECHARGE_PRICE_NOTICE = "充值参考：0.9元约10次设计服务"
+
+# 微信昵称的长度上限（前后端同值？**不是**——前端只拦必填，长度由后端 40019 报，
+# 与 Spec19 对手机号/邮箱的处理同一个立场：规则只有一份中文 message，在后端）。
+RECHARGE_WECHAT_MAX = int(os.getenv("RECHARGE_WECHAT_MAX", "64"))
+
+# 同一用户的充值申请冷却期（秒）。默认 180 = 3 分钟（用户给的频次限制）。
+# 冷却期内再提交 → 后端返回 40905，前端跳出告警（那句文案见下面）。
+# 它同时是**发信**的频次上限：每条新申请最多一封信，而新申请最多每 3 分钟一条。
+RECHARGE_COOLDOWN_SECONDS = int(os.getenv("RECHARGE_COOLDOWN_SECONDS", "180"))
+
+# 冷却期告警的文案（唯一来源，前端零副本——与 QUOTA_EXCEEDED_MESSAGE 同一原则）。
+# 分钟数是**从上面的秒数推出来的**，不是另写一个 "3"：改了冷却期而忘了改文案，
+# 就会出现"提示说 3 分钟、实际拦 10 分钟"这种没人查得出来的谎话。
+# 不足 1 分钟按 1 分钟说（宁可把窗口说长，也不说"每 0 分钟"）。
+RECHARGE_COOLDOWN_MESSAGE = (
+    f"每{max(1, RECHARGE_COOLDOWN_SECONDS // 60)}分钟才可以申报一次充值！"
+    "请耐心等待，若已充值，金额会在30秒内尽快到账！"
+)
+
+# 充值提醒的收件人。默认跟随 SUPPORT_EMAIL，但**单独一个变量**：
+# SUPPORT_EMAIL 是给用户看的客服邮箱，哪天换成对外公开邮箱，充值提醒不该跟着寄到别处
+# （与 Spec20 的 REGISTER_NOTIFY_TO 同一个取舍）。
+RECHARGE_NOTIFY_TO = os.getenv("RECHARGE_NOTIFY_TO", SUPPORT_EMAIL).strip()
+
 # ===== 服务限额（Spec18：API 服务调用计量与用户限额）=====
 QUOTA_DEFAULT_LIMIT = int(os.getenv("QUOTA_DEFAULT_LIMIT", "25"))    # 新建用户的默认限额（累计次数）
 QUOTA_LIMIT_MAX = int(os.getenv("QUOTA_LIMIT_MAX", "100000"))        # 管理员可设的限额上限（防误输入天文数字）
-QUOTA_CONTACT_EMAIL = os.getenv("QUOTA_CONTACT_EMAIL", SUPPORT_EMAIL).strip()
 # 超额提示语（唯一来源；前端只负责显示后端返回的 message，不做同值副本）
-QUOTA_EXCEEDED_MESSAGE = (
-    f"您的服务次数已达上限，请联系管理员续费可继续使用！（管理员邮箱：{QUOTA_CONTACT_EMAIL}）"
-)
+#
+# ⚠️ 文案里**不再带客服邮箱**（用户改的口径）：提示语本身已经把用户指向「充值面板」，
+# 而收款码与参考价都在那个面板里，再塞一个邮箱只会让人去发邮件而不去点面板。
+# 因此原本只为拼这句而存在的 QUOTA_CONTACT_EMAIL 已删除——留一个「设了也不生效」的
+# 环境变量，正是本仓反复记录的那类静默失败（同 Spec20 不设 REGISTER_NOTIFY_ENABLED
+# 的理由）。客服邮箱仍是 SUPPORT_EMAIL，注册页那行「有问题请致信官方客服」照常用它。
+QUOTA_EXCEEDED_MESSAGE = "您的余额已不足，若您单击登录键则会跳出充值面板！"
 # 注意 QUOTA_DEFAULT_LIMIT 的作用域：它只在「新建用户」与「补列迁移给存量行填初值」两处生效，
 # 改它**不会**影响任何已存在的用户（Spec18 §3.3-5）。要给某人加额度走
 # PUT /api/admin/users/{id}/quota。

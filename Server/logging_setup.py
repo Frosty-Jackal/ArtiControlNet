@@ -30,7 +30,18 @@ class JsonFormatter(logging.Formatter):
                # 的固定含义（每个路由的每行日志都带它），两者同名会让排查时
                # 拿 request_id 一搜就串味。注册申请 id 一律叫 register_id。
                "register_id", "has_phone", "has_email",
-               "decision", "was_status")
+               "decision", "was_status",
+               # Spec20 注册申请邮件通知事件字段（notify.register_mail_*）。
+               # 注意 "error" 不是新概念：main.py / task_queue.py 里早有同名的
+               # 事件名（request.error / task.error），但**没有**任何调用方把它
+               # 当 extra 键传过——加进白名单不会让既有日志长出字段。
+               "to", "error",
+               # Spec21 余额与充值事件字段（recharge.submitted / recharge.reviewed / …）。
+               # 注意用 recharge_source 而不是 source：后者在本仓已是
+               # Spec12 wiki 事件的"作品来源"（generate|edit|upload），
+               # 两者同名会让 `grep '"source"'` 一次捞到两种含义的东西。
+               # 这与 Spec19 用 register_id 而不是 request_id 是同一条理由。
+               "recharge_id", "recharge_source", "amount")
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(

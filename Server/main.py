@@ -11,7 +11,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, Header, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -23,9 +23,11 @@ import community
 import config
 import db
 import gallery
+import mailer
 import media
 import schemas
 import shares
+import timefmt
 import wiki
 from agents.supervisor import run_supervisor
 from errors import (AppError, AuthTokenError, BadRequestError,
@@ -35,7 +37,10 @@ from errors import (AppError, AuthTokenError, BadRequestError,
                     GalleryItemNotFoundError, LoginFailedError,
                     LoginRateLimitedError, NotFoundError, PaymentQrMissingError,
                     PostContentError, PostNotFoundError, QuotaExceededError,
-                    QuotaLimitError, RegisterAlreadyReviewedError,
+                    QuotaLimitError, RechargeAlreadyReviewedError,
+                    RechargeNotFoundError, RechargeRateLimitedError,
+                    RechargeRequestError,
+                    RegisterAlreadyReviewedError,
                     RegisterClosedError, RegisterRateLimitedError,
                     RegisterRequestError, RegisterRequestNotFoundError,
                     ShareNotFoundError, SuggestionContentError,
@@ -309,14 +314,17 @@ app.add_middleware(
 
 # ---------- 统一鉴权中间件（Spec2 §6.2）----------
 
-# 放行列表：除登录与注册链路的三个公开接口外，所有 /api 接口都需登录态（Spec19 §6.8）。
-# 这四个是**精确匹配**（`path not in PUBLIC_AUTH_PATHS`），不是前缀匹配——
+# 放行列表：除登录、注册链路与欠费充值外，所有 /api 接口都需登录态（Spec19 §6.8 / Spec21 §6.3）。
+# 这五条是**精确匹配**（`path not in PUBLIC_AUTH_PATHS`），不是前缀匹配——
 # 新增路径时必须原样写全，别写成 /api/auth/register 就以为能覆盖 -config。
 PUBLIC_AUTH_PATHS = {
     "/api/auth/login",
     "/api/auth/register",        # Spec19：提交注册申请（无登录态）
     "/api/auth/register-config", # Spec19：注册弹窗的公开配置
     "/api/auth/payment-qr",      # Spec19：收款码图片
+    # Spec21：欠费充值申请。用户此时正被 40304 拦在门外，手里没有 token；
+    # 它只能产生一条**待审批**记录，不能给任何人加额度（§3.3-2）。
+    "/api/auth/recharge-request",
 }
 
 
@@ -380,7 +388,11 @@ async def auth_middleware(request: Request, call_next):
         # 位置：放在 request.state.user 之后（日志/上下文需要它），
         #       放在 /api/admin/* 判断之前（管理员恒豁免，顺序上先排掉更省分支）。
         # 这一次判定不额外查库：used 已由 db.get_user_by_id 的 LEFT JOIN 带出（§2.3）。
-        if not user["is_admin"] and user["used"] >= user["quota_limit"]:
+        # Spec21 §5.7：判据是 `used > quota_limit`（**不是** `>=`）——整数下与
+        # `>= limit + 1` 等价，但少一次加法、也不会有人把 +1 写在括号外。
+        # 效果：限额 25 的用户能做完第 26 次调用（原口径下第 25 次一成功就被踢，
+        # 结果拿不到、钱却已经花了）。四处副本，见 §5.7。
+        if not user["is_admin"] and user["used"] > user["quota_limit"]:
             return _quota_reject(request, user)
         if path.startswith("/api/admin/"):
             if not user["is_admin"]:
@@ -1056,7 +1068,8 @@ async def login(payload: schemas.LoginRequest, request: Request,
     # Spec18 §6.3：限额判定放在密码校验之后（否则任何人都能拿用户名探测账号状态），
     # 放在 reset_login_failures 之前（被拒绝的请求不产生任何"部分成功"的副作用）。
     # 管理员永远走不到这个分支。
-    if not user["is_admin"] and user["used"] >= user["quota_limit"]:
+    # Spec21 §5.7：阈值与中间件那一处同步改成 `>`（原文是 `>=`）。
+    if not user["is_admin"] and user["used"] > user["quota_limit"]:
         logger.warning("服务次数已达上限，拒绝登录", extra={
             "event": "auth.quota_blocked", "request_id": request_id,
             "username": user["username"], "used": user["used"],
@@ -1120,6 +1133,7 @@ async def payment_qr():
 
 @app.post("/api/auth/register")
 async def register_request(payload: schemas.RegisterRequestCreate, request: Request,
+                           background_tasks: BackgroundTasks,
                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
     """提交注册申请（Spec19 §6.2）：**落一条申请，不创建任何用户**。
 
@@ -1181,6 +1195,171 @@ async def register_request(payload: schemas.RegisterRequestCreate, request: Requ
         "register_id": record["id"], "username": username,
         "has_phone": bool(phone), "has_email": bool(email),
     })
+
+    # Spec20：新申请邮件通知。在 return **之前**注册任务（否则任务不会被登记），
+    # 但它在响应发出**之后**才跑——注册接口的耗时一秒都不涨。
+    # 联系方式邮箱优先，没有才用手机号（Spec20 §2.3）；`or "未填写"` 是纯防御，
+    # 上面的格式校验（手机号与邮箱至少一项）已保证正常路径不可达。
+    background_tasks.add_task(
+        mailer.send_register_notification,
+        username,
+        email or phone or "未填写",
+        wechat,                      # Spec21 §2.7：正文前缀「微信充值账号是…，」
+        record["created_at"],
+    )
+
+    return _ok({"id": record["id"]})
+
+
+# ---------- 余额与充值（Spec21 §6.1 ~ §6.3）----------
+
+@app.post("/api/auth/recharge-request")
+async def overdue_recharge_request(payload: schemas.RechargeOverdueCreate, request: Request,
+                                   background_tasks: BackgroundTasks,
+                                   x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """欠费充值申请（Spec21 §6.3）：**公开**，无登录态。
+
+    用户此刻正被 40304 拦在登录页上，手里没有 token。收款码本身已经是公开的
+    （Spec19 §3.3-6），这条路由的暴露面与它同级——它**只能产生一条待审批记录**，
+    不能给任何人加额度。**不校验密码**（已确认）：代价见 §3.3-2，上限是"你的欠费
+    账号数"（幂等保证每个账号最多一条 pending），不是攻击者的资源数。
+
+    校验顺序即契约（与 Spec19 §6.2 同一个写法）：账号 → 昵称 → 账号存在 → 确实欠费 → 幂等。
+    """
+    request_id = _request_id(x_request_id)
+    username = (payload.username or "").strip()
+    wechat = (payload.wechat or "").strip()
+
+    if not username:
+        raise RechargeRequestError("请填写账号")
+    if not wechat or len(wechat) > config.RECHARGE_WECHAT_MAX:
+        raise RechargeRequestError("请填写用于支付的微信昵称")
+
+    user = db.get_user_by_username(username)
+    if user is None:
+        raise RechargeRequestError("账号不存在")
+    # "确实已超额"用的就是 §5.7 那个阈值（第 5 处使用，但它是新增代码，不在
+    # "改动既有副本"的清单里）。管理员不受限额，没有"欠费"这回事。
+    if user["is_admin"] or user["used"] <= user["quota_limit"]:
+        raise RechargeAlreadyReviewedError("当前账号无需充值")
+
+    # 频次限制（比幂等更靠前，见 §6.2 同款注释）。**公开端点上的已知代价**：
+    # 谁都能替一个欠费账号提交，从而把这个账号的冷却期一直续上——上限是"拖延他
+    # 3 分钟"，加额度仍然只发生在管理员点「同意」那一刻，与 §3.3-2 的取舍同级。
+    recent = db.find_recent_recharge_by_user(user["id"], config.RECHARGE_COOLDOWN_SECONDS)
+    if recent is not None:
+        logger.info("欠费充值申请过于频繁（冷却期内）", extra={
+            "event": "recharge.rate_limited", "request_id": request_id,
+            "username": user["username"], "recharge_id": recent["id"],
+            "recharge_source": "overdue",
+        })
+        raise RechargeRateLimitedError()
+
+    existing = db.find_pending_recharge(user["id"])
+    if existing is not None:
+        logger.info("欠费充值申请重复提交（幂等命中）", extra={
+            "event": "recharge.submitted_duplicate", "request_id": request_id,
+            "username": user["username"], "recharge_id": existing["id"],
+            "recharge_source": "overdue",
+        })
+        return _ok({"id": existing["id"]})
+
+    record = db.create_recharge_request(user["id"], user["username"], wechat, "overdue")
+    logger.info("收到欠费充值申请", extra={
+        "event": "recharge.submitted", "request_id": request_id,
+        "username": user["username"], "recharge_id": record["id"],
+        "recharge_source": "overdue",
+    })
+    # 联系方式邮箱优先，没有才用手机号（§2.7）。`or "未填写"` 是纯防御：
+    # 管理员手工建的号两个都没有（§2.1），这是**允许的形态**，不是 bug。
+    background_tasks.add_task(
+        mailer.send_recharge_notification,
+        user["username"], user["email"] or user["phone"] or "未填写",
+        wechat, record["created_at"], True,
+    )
+    return _ok({"id": record["id"]})
+
+
+@app.get("/api/recharge/info")
+async def get_recharge_info(request: Request):
+    """余额与充值弹窗的配置（Spec21 §6.1）：余额 + 收款码地址 + 参考价备注。
+
+    **余额由后端算**：前端根本拿不到 quota_limit / used（/api/auth/me 只返回
+    username/is_admin），而且这与"文案唯一来源在后端"是同一条原则（§2.9）。
+    公式照用户原话：`(quota_limit - used) / 10` 元，保留 1 位小数。
+    **负数照原样显示**——超额用户欠你 1 次，抹成 0 是撒谎。
+
+    qr_url 用 _public_base 拼**绝对地址**（与 register-config 完全同款），
+    前端直接塞进 <img src>，不做任何拼接。
+
+    管理员照常拿到数字（前端不画入口，§2.9）——少一个分支，也少一个
+    "接口和按钮不一致"的坑。
+    收款码文件缺失时本接口**不报错**：它只返回 URL，裂图由 payment_qr 的 40410 决定。
+    """
+    user = request.state.user
+    record = db.get_user_by_id(user["id"])      # 登录态里没有 quota/used，回读库
+    return _ok({
+        "balance": round((record["quota_limit"] - record["used"]) / 10, 1),
+        "quota_limit": record["quota_limit"],
+        "used": record["used"],
+        "qr_url": f"{_public_base(request)}/api/auth/payment-qr",
+        "price_notice": config.RECHARGE_PRICE_NOTICE,
+    })
+
+
+@app.post("/api/recharge/requests")
+async def submit_recharge(payload: schemas.RechargeRequestCreate, request: Request,
+                          background_tasks: BackgroundTasks,
+                          x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """系统内主动充值（Spec21 §6.2）：普通用户点顶部「余额与充值」后提交。
+
+    身份取自 token（`request.state.user["id"]`），**不接受客户端传 username**。
+    source 恒为 "user"（另一条入口是公开的 /api/auth/recharge-request，"overdue"）。
+
+    幂等（§2.4）：同一用户已有 pending → **不落库、不发信**，照常返回那条的 id。
+    这是"我已经点过了"的正常行为，不是攻击；前端也**不区分**（成功面板永远一句话）。
+
+    **频次限制**（用户后来加的）排在幂等**之前**：不然连点两下会被幂等那条静静接住、
+    200 返回同一个 id，用户看不到任何反馈——而这正是他连点时要问的事（"我到底提交上没有"）。
+    冷却期一过，幂等照旧生效，两条规则各管一段，不打架。
+    """
+    request_id = _request_id(x_request_id)
+    user_id = request.state.user["id"]
+    wechat = (payload.wechat or "").strip()
+    if not wechat or len(wechat) > config.RECHARGE_WECHAT_MAX:
+        raise RechargeRequestError("请填写用于支付的微信昵称")
+
+    recent = db.find_recent_recharge_by_user(user_id, config.RECHARGE_COOLDOWN_SECONDS)
+    if recent is not None:
+        logger.info("充值申请过于频繁（冷却期内）", extra={
+            "event": "recharge.rate_limited", "request_id": request_id,
+            "username": request.state.user["username"],
+            "recharge_id": recent["id"], "recharge_source": "user",
+        })
+        raise RechargeRateLimitedError()
+
+    existing = db.find_pending_recharge(user_id)
+    if existing is not None:
+        logger.info("充值申请重复提交（幂等命中）", extra={
+            "event": "recharge.submitted_duplicate", "request_id": request_id,
+            "username": request.state.user["username"],
+            "recharge_id": existing["id"], "recharge_source": "user",
+        })
+        return _ok({"id": existing["id"]})
+
+    # 回读库拿 phone / email：登录态里只有 id/username/is_admin（§2.7）
+    user = db.get_user_by_id(user_id)
+    record = db.create_recharge_request(user_id, user["username"], wechat, "user")
+    logger.info("收到充值申请", extra={
+        "event": "recharge.submitted", "request_id": request_id,
+        "username": user["username"], "recharge_id": record["id"],
+        "recharge_source": "user",
+    })
+    background_tasks.add_task(
+        mailer.send_recharge_notification,
+        user["username"], user["email"] or user["phone"] or "未填写",
+        wechat, record["created_at"], False,
+    )
     return _ok({"id": record["id"]})
 
 
@@ -1205,12 +1384,21 @@ async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Re
 
 @app.get("/api/admin/users")
 async def admin_list_users(request: Request):
-    """用户列表（Spec18 §6.1）：每项带 quota_limit / used，**不含** password_hash。
+    """用户列表（Spec18 §6.1）：每项带 quota_limit / used / phone / email，**不含** password_hash。
 
-    不返回"是否超额"这个派生布尔——前端用 `!u.is_admin && u.used >= u.quota_limit`
+    不返回"是否超额"这个派生布尔——前端用 `!u.is_admin && u.used > u.quota_limit`
     现算，超额的判据只有一处，复制到接口层就多了一个会漂移的副本。
+    （Spec21 §5.7：阈值由 `>=` 改成 `>`，四处副本见 §5.7。）
+
+    Spec21 §5.2：额外带一个 `created_at_beijing`。**不覆盖 `created_at`**——UTC ISO
+    仍是它本来的值（排序 / 排障 / 将来别的消费者都用得上），展示串是"多出来的一个键"。
+    前端转时区会给出**浏览器所在时区**，而用户要的是"北京时间"这个绝对量，
+    于是它不该取决于谁在看（§2.2）。
     """
-    return _ok(db.list_users())
+    items = db.list_users()
+    for u in items:
+        u["created_at_beijing"] = timefmt.beijing_time_text(u["created_at"])
+    return _ok(items)
 
 
 @app.put("/api/admin/users/{user_id}/quota")
@@ -1310,8 +1498,13 @@ async def admin_list_register_requests(request: Request):
     **不含** password_hash（_register_row_to_dict 的默认行为，结构性保证），
     **不含** ip（它只服务于冷却期判定，对"批准谁"这个决策没有帮助）。
     无分页、无筛选：量级由 IP 冷却天然限制（每台设备每天最多 1 条）。
+
+    Spec21 §7.2：额外带 `created_at_beijing`（同一页两种时区比不改更糟）。
     """
-    return _ok(db.list_register_requests())
+    items = db.list_register_requests()
+    for r in items:
+        r["created_at_beijing"] = timefmt.beijing_time_text(r["created_at"])
+    return _ok(items)
 
 
 @app.post("/api/admin/register-requests/{request_id}/approve")
@@ -1392,6 +1585,113 @@ async def admin_delete_register(request_id: int, request: Request,
     logger.info("删除注册申请", extra={
         "event": "auth.register_deleted", "request_id": rid,
         "register_id": request_id, "operator": operator["username"],
+        "target_user": record["username"], "was_status": record["status"],
+    })
+    return _ok({"id": request_id})
+
+
+# ---------- 充值审批（Spec21 §6.5，仅管理员）----------
+
+@app.get("/api/admin/recharge-requests")
+async def admin_list_recharge_requests(request: Request):
+    """充值台账（Spec21 §6.5）：pending 优先，组内 id 倒序（最新在前）。
+
+    每项额外带 `created_at_beijing`；`reviewed_at` 非 None 时再带
+    `reviewed_at_beijing`（为 None 时**不加这个键**，前端 v-if 判空）。
+    不含 ip —— 本表根本没有这一列（防刷靠幂等而不是冷却，§2.3）。
+    """
+    items = db.list_recharge_requests()
+    for c in items:
+        c["created_at_beijing"] = timefmt.beijing_time_text(c["created_at"])
+        if c["reviewed_at"] is not None:
+            c["reviewed_at_beijing"] = timefmt.beijing_time_text(c["reviewed_at"])
+    return _ok(items)
+
+
+@app.post("/api/admin/recharge-requests/{request_id}/approve")
+async def admin_approve_recharge(request_id: int, payload: schemas.RechargeApproveRequest,
+                                 request: Request,
+                                 x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """同意充值申请（Spec21 §6.5）：**同一事务**内置 approved + 记 amount + 加额度。
+
+    加多少次由管理员当次给定（与 Spec19 §6.5 同一个理由：弹窗上写着「0.9 元约 10 次」，
+    但**实收金额是你在微信里看到的**，只有你知道；写死 +10 会在有人付了 2 元时
+    变成一个改不了的错）。下界是 1：加 0 次是一次无意义的点击，几乎必然是手滑。
+    上界复用 QuotaLimitError（40017）——超上限的后果与「改限额」超上限完全一样。
+
+    校验顺序见 §6.5（amount → 记录存在 → 仍 pending → 目标用户还在 → 上界 → 事务）。
+    目标用户已被删除时**预检**：让 UPDATE users 影响 0 行然后静默提交，会留下
+    "记录显示已批准、钱没到账"的挂账（§2.5）。
+    """
+    rid = _request_id(x_request_id)
+    operator = request.state.user
+    if payload.amount < 1:
+        raise QuotaLimitError("充值次数需为不小于 1 的整数")
+    record = db.get_recharge_request(request_id)
+    if record is None:
+        raise RechargeNotFoundError()
+    if record["status"] != "pending":
+        # 不能静默改成 rejected——那是在替管理员做决定
+        raise RechargeAlreadyReviewedError()
+    target = db.get_user_by_id(record["user_id"])
+    if target is None:
+        raise UserNotFoundError("用户已被删除，无法充值")
+    if target["quota_limit"] + payload.amount > config.QUOTA_LIMIT_MAX:
+        raise QuotaLimitError()
+    user = db.approve_recharge_request(request_id, payload.amount)
+    if user is None:                      # 并发抢跑：事务已整体回滚，额度没加
+        raise RechargeAlreadyReviewedError()
+    logger.info("同意充值申请", extra={
+        "event": "recharge.reviewed", "request_id": rid,
+        "recharge_id": request_id, "operator": operator["username"],
+        "target_user": user["username"], "decision": "approved",
+        "amount": payload.amount,
+    })
+    # 回带 used：前端不必再拉一次整表就能就地更新那一行（与 admin_set_quota 同款）
+    return _ok({"id": user["id"], "username": user["username"],
+                "quota_limit": user["quota_limit"], "used": user["used"]})
+
+
+@app.post("/api/admin/recharge-requests/{request_id}/reject")
+async def admin_reject_recharge(request_id: int, request: Request,
+                                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """拒绝充值申请（Spec21 §6.5）：只改状态，**不加额度、不删记录**。
+
+    amount 保持 NULL（从未批准过，也就没有"加了多少"这回事）。
+    """
+    rid = _request_id(x_request_id)
+    operator = request.state.user
+    record = db.get_recharge_request(request_id)
+    if record is None:
+        raise RechargeNotFoundError()
+    if db.reject_recharge_request(request_id) is None:
+        raise RechargeAlreadyReviewedError()
+    logger.info("拒绝充值申请", extra={
+        "event": "recharge.reviewed", "request_id": rid,
+        "recharge_id": request_id, "operator": operator["username"],
+        "target_user": record["username"], "decision": "rejected",
+    })
+    return _ok({"id": request_id})
+
+
+@app.delete("/api/admin/recharge-requests/{request_id}")
+async def admin_delete_recharge(request_id: int, request: Request,
+                                x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """删除一条充值记录（Spec21 §6.5，任意状态都能删）。
+
+    **不触碰 users**（§2.6）：删除一条**已同意**的记录**不会**把加过的额度收回来
+    ——那要走「改限额」（PUT /api/admin/users/{id}/quota），那条路是幂等的绝对值设置，
+    比"反向加负数"安全得多。这个副作用写在确认文案里（§7.3）。
+    """
+    rid = _request_id(x_request_id)
+    operator = request.state.user
+    record = db.get_recharge_request(request_id)
+    if record is None:
+        raise RechargeNotFoundError()
+    db.delete_recharge_request(request_id)
+    logger.info("删除充值记录", extra={
+        "event": "recharge.deleted", "request_id": rid,
+        "recharge_id": request_id, "operator": operator["username"],
         "target_user": record["username"], "was_status": record["status"],
     })
     return _ok({"id": request_id})

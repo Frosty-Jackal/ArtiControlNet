@@ -298,6 +298,46 @@ class RegisterAlreadyReviewedError(AppError):
         super().__init__(40903, message, status_code=409)
 
 
+# ---- 余额与充值（Spec21 §9，追加到 Spec19 §9 之后）----
+
+class RechargeRequestError(BadRequestError):
+    """充值申请字段非法 / 账号不存在 / 账号无需充值。
+
+    多个不同 message 共用一个码，与 Spec19 的 RegisterRequestError（40018）同款。
+    """
+
+    def __init__(self, message: str = "充值申请信息非法"):
+        super().__init__(message, code=40019)
+
+
+class RechargeNotFoundError(NotFoundError):
+    """充值记录不存在。"""
+
+    def __init__(self, message: str = "充值记录不存在"):
+        super().__init__(message, code=40411)
+
+
+class RechargeRateLimitedError(AppError):
+    """同一用户在冷却期内又提交了一次充值申请（Spec21 §2.4 的频次限制）。
+
+    与 RegisterRateLimitedError（40902）同一个 family：都是"这东西你已经给了，
+    先等着"的冲突，不是字段错误（40019），也不是身份问题。用 409 而非 429：
+    本仓没有 429，且前端只认 code，多一套 HTTP 语义反而多一处要对齐的东西。
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            40905, message or config.RECHARGE_COOLDOWN_MESSAGE, status_code=409
+        )
+
+
+class RechargeAlreadyReviewedError(AppError):
+    """该充值记录已被处理（或两个管理员同时点了同意，后到的那个）。"""
+
+    def __init__(self, message: str = "该充值记录已处理"):
+        super().__init__(40904, message, status_code=409)
+
+
 class InternalError(AppError):
     def __init__(self, message="内部错误"):
         super().__init__(50001, message, status_code=500)

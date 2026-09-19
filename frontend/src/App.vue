@@ -41,6 +41,11 @@
         <button v-if="auth.isAdmin" class="btn-clear" @click="toggleStats">
           {{ showStats ? '返回聊天' : '数据统计' }}
         </button>
+        <!-- Spec21 §7.1：余额与充值（仅普通用户）。管理员 used/quota_limit 照常累计
+             但不参与判定，给他显示一个无业务含义的余额是误导（§2.9）。 -->
+        <button v-if="!auth.isAdmin" class="btn-clear" @click="showRecharge = true">
+          余额与充值
+        </button>
         <button class="btn-clear" title="使用帮助" @click="showHelp = !showHelp">帮助</button>
         <button class="btn-logout" title="退出登录" @click="onLogout">退出</button>
       </header>
@@ -74,6 +79,9 @@
 
       <!-- Spec8：帮助弹窗（顶层 overlay，任何视图都可用） -->
       <HelpModal v-if="showHelp" @close="showHelp = false" />
+
+      <!-- Spec21 §7.1：余额与充值弹窗（同样挂在顶层，任何面板视图下都可用） -->
+      <RechargeModal v-if="showRecharge" @close="showRecharge = false" />
     </div>
   </div>
 </template>
@@ -93,6 +101,8 @@ import GalleryPanel from './views/GalleryPanel.vue'
 import CommunityPanel from './views/CommunityPanel.vue'
 import SuggestionPanel from './views/SuggestionPanel.vue'
 import HelpModal from './views/HelpModal.vue'
+import RechargeModal from './views/RechargeModal.vue'
+import { setQuotaUsername } from './utils/quotaNotice'
 
 const auth = useAuthStore()
 auth.init()
@@ -127,6 +137,8 @@ const showAdmin = ref(false)
 const showStats = ref(false)
 const showCommunity = ref(false)
 const showSuggestions = ref(false)
+// Spec21 §7.1：余额与充值弹窗不参与面板互斥——它是 overlay，不是视图（与帮助同款）
+const showRecharge = ref(false)
 // 「我的作品/社区/建议」所有登录用户可见，「用户管理/数据统计」仅管理员；五面板互斥：打开一个自动关闭其余四个
 function closeOtherPanels(keep) {
   const map = { gallery: showGallery, admin: showAdmin, stats: showStats, community: showCommunity, suggestions: showSuggestions }
@@ -190,6 +202,10 @@ window.addEventListener('artcn:unauthorized', () => {
 // （登录态坏了 vs 额度用完了），日志和将来可能的分叉处理都需要能分开。
 // 提示语已由拦截器写进 utils/quotaNotice，由登出后挂载的 Login.vue 弹出。
 window.addEventListener('artcn:quota_exceeded', () => {
+  // Spec21 §7.1：补写 username 供登录页的欠费充值面板预填账号。
+  // **必须在 auth.logout() 之前**——logout 之后 auth.username 就空了。
+  // （提示语本身由拦截器写，那里拿不到 store；两处分工见 utils/quotaNotice.js）
+  setQuotaUsername(auth.username)
   auth.logout()
   closeAllPanels()
 })

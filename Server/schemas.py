@@ -183,3 +183,26 @@ class RegisterApproveRequest(BaseModel):
     """
 
     quota_limit: int
+
+
+# ---- 余额与充值（Spec21 §6.2~§6.5）----
+
+class RechargeRequestCreate(BaseModel):
+    """POST /api/recharge/requests 请求体（Spec21 §6.2）。
+    长度/空值校验在路由层（40019），Pydantic 只负责"字段在不在"。"""
+
+    wechat: str
+
+
+class RechargeOverdueCreate(BaseModel):
+    """POST /api/auth/recharge-request 请求体（Spec21 §6.3）。同上。"""
+
+    username: str
+    wechat: str
+
+
+class RechargeApproveRequest(BaseModel):
+    """POST /api/admin/recharge-requests/{id}/approve 请求体（Spec21 §6.5）。
+    非整数由 Pydantic 拦下 → 40001；取值范围（≥1 且不超 QUOTA_LIMIT_MAX）在路由层判。"""
+
+    amount: int

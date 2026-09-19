@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     is_admin      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
-    quota_limit   INTEGER NOT NULL DEFAULT {_QUOTA_DEFAULT}
+    quota_limit   INTEGER NOT NULL DEFAULT {_QUOTA_DEFAULT},
+    phone         TEXT,          -- Spec21：手机号（可空——管理员手工建的号没有）
+    email         TEXT           -- Spec21：邮箱（同上）
 )
 """
 
@@ -259,6 +261,41 @@ _CREATE_REGISTER_REQUESTS_STATUS_INDEX = (
     "ON register_requests(status, id DESC)"
 )
 
+# 充值台账（Spec21 §5.3）：一行 = 一条待处理/已处理的充值申请。
+# 「台账」语义与 Spec19 的 register_requests 完全相同：同意/拒绝都保留记录（status），
+# 只有「删除」才真删行（§2.3）。刻意**没有** UNIQUE(user_id, status)——
+# 被拒绝之后必须能再申请，唯一性靠 status='pending' 的幂等查询兜（§2.4）。
+# 刻意**没有** ip 列：防刷靠幂等而不是冷却，于是本表不含任何多余 PII（§2.3）。
+_CREATE_RECHARGE_REQUESTS_TABLE = """
+CREATE TABLE IF NOT EXISTS recharge_requests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,             -- 加额度的目标（users.id）
+    username    TEXT NOT NULL,                -- 提交时刻的账号名快照（台账要能脱离 users 读）
+    wechat      TEXT NOT NULL,                -- 充值用的微信昵称（唯一的对账键）
+    source      TEXT NOT NULL DEFAULT 'user', -- 'user'（系统内主动充值）| 'overdue'（欠费被拦时提交）
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+    amount      INTEGER,                      -- 同意时管理员填的加次数（NULL = 尚未处理）
+    created_at  TEXT NOT NULL,                -- 提交时刻（UTC ISO）
+    reviewed_at TEXT                          -- 同意/拒绝的时刻（NULL = 尚未处理）
+)
+"""
+
+# 幂等查询走这条：WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1
+_CREATE_RECHARGE_REQUESTS_USER_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_recharge_requests_user "
+    "ON recharge_requests(user_id, status, id DESC)"
+)
+
+# 列表查询走这条：pending 优先 + 组内 id 倒序（与 Spec19 §6.4 同款）
+_CREATE_RECHARGE_REQUESTS_STATUS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_recharge_requests_status "
+    "ON recharge_requests(status, id DESC)"
+)
+
+# 来源 / 状态白名单（校验用，不拼接外部输入）
+_RECHARGE_SOURCES = ("user", "overdue")
+_RECHARGE_STATUSES = ("pending", "approved", "rejected")
+
 # 反馈类别白名单（set_feedback 校验，不拼接外部输入）
 _FEEDBACK_CATEGORIES = ("generate", "edit", "qa")
 _FEEDBACK_VOTES = ("like", "dislike")
@@ -313,6 +350,13 @@ def _row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict 
     这个保证就从"调用方自觉"变成了结构性的。
 
     新增：`quota_limit`（users 列）、`used`（user_quota 累计，见 _USER_SELECT）。
+
+    Spec21 §5.1：再带出 `phone` / `email`（联系方式，可能为 None）。它们会流向 5 个
+    地方，其中**只有 `list_users()` → `GET /api/admin/users` 是接口响应**（仅管理员）；
+    其余四处（get_user_by_id / get_user_by_username / set_user_quota /
+    approve_register_request）的调用方都只取自己需要的字段再手写一个小 dict 返回，
+    不会把整个 dict 直接 `_ok(...)` 出去。**新增读 users 的路由时要保持这个约定。**
+
     `with_secret=True` 全仓只有 `get_user_by_username` 一处（登录校验密码）。
     """
     if row is None:
@@ -324,6 +368,8 @@ def _row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict 
         "created_at": row["created_at"],
         "quota_limit": int(row["quota_limit"]),
         "used": int(row["used"]),
+        "phone": row["phone"],        # Spec21：可能为 None（管理员手工建的号）
+        "email": row["email"],        # Spec21：同上
     }
     if with_secret:
         record["password_hash"] = row["password_hash"]
@@ -474,6 +520,27 @@ def _register_row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False)
     return record
 
 
+def _recharge_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    """充值行 → dict（Spec21 §5.4）。
+
+    **没有 `with_secret`**——本表根本没有密码列（对比 `_register_row_to_dict`）。
+    **不带出 `ip`**——本表连这一列都没有（§2.3，防刷靠幂等而不是冷却）。
+    """
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "wechat": row["wechat"],
+        "source": row["source"],
+        "status": row["status"],
+        "amount": row["amount"],
+        "created_at": row["created_at"],
+        "reviewed_at": row["reviewed_at"],
+    }
+
+
 # ---------- 生命周期 ----------
 
 def _migrate_images_wiki_used(conn: sqlite3.Connection) -> None:
@@ -537,6 +604,47 @@ def _migrate_users_quota_limit(conn: sqlite3.Connection) -> None:
             f"DEFAULT {_QUOTA_DEFAULT}"
         )
         logger.info("users.quota_limit 列已补齐", extra={"event": "db.migrate"})
+
+
+def _migrate_users_contact(conn: sqlite3.Connection) -> None:
+    """存量库补 users.phone / users.email（Spec21 §5.1），并把已开通用户的联系方式回填一次。
+
+    两列**独立**判存在性，不共用一个 if：万一上一次跑了个半截（phone 加了、email 没加），
+    共用一个判断会让 email 永远补不上。
+    回填只在"确实补过列"的那次跑：库里的 register_requests 是唯一来源，
+    它不会变（Spec19 的申请行只增不隐），所以回填天然一次性。
+
+    只认 status='approved' 的行：被拒绝的申请里的联系方式**不属于任何账号**
+    （那个人从来没被开通），拿它填进去等于凭空捏造一条联系方式（§2.1）。
+
+    已知边界（§3.3-7，**不修**）：用户被删后重建同名账号，回填会把前一个人的
+    联系方式填到新账号上——那是同名的两个人，本函数无法区分。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    added = False
+    if "phone" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+        added = True
+    if "email" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        added = True
+    if not added:
+        return
+    # ORDER BY r.id DESC LIMIT 1 是**纯防御**：users.username 有 UNIQUE，所以同一个
+    # 用户名最多只会有一条 approved 申请（第二条会在建号时撞 40001）。写明它只是
+    # 为了让"取哪一条"有一个确定的答案。
+    conn.execute(
+        "UPDATE users SET "
+        "  phone = (SELECT r.phone FROM register_requests r "
+        "           WHERE r.username = users.username AND r.status = 'approved' "
+        "           ORDER BY r.id DESC LIMIT 1), "
+        "  email = (SELECT r.email FROM register_requests r "
+        "           WHERE r.username = users.username AND r.status = 'approved' "
+        "           ORDER BY r.id DESC LIMIT 1) "
+        "WHERE EXISTS (SELECT 1 FROM register_requests r "
+        "              WHERE r.username = users.username AND r.status = 'approved')"
+    )
+    logger.info("users.phone / users.email 列已补齐并回填", extra={"event": "db.migrate"})
 
 
 def _migrate_usage_style(conn: sqlite3.Connection) -> None:
@@ -647,6 +755,14 @@ def init_db() -> None:
         conn.execute(_CREATE_REGISTER_REQUESTS_TABLE)
         conn.execute(_CREATE_REGISTER_REQUESTS_IP_INDEX)
         conn.execute(_CREATE_REGISTER_REQUESTS_STATUS_INDEX)
+        # Spec21 §5.3：充值台账。与 register_requests 同类——全新空表，
+        # CREATE TABLE IF NOT EXISTS 对新库/存量库行为一致，不需要迁移函数。
+        conn.execute(_CREATE_RECHARGE_REQUESTS_TABLE)
+        conn.execute(_CREATE_RECHARGE_REQUESTS_USER_INDEX)
+        conn.execute(_CREATE_RECHARGE_REQUESTS_STATUS_INDEX)
+        # Spec21 §5.1：users 补 phone/email 并回填。
+        # ⚠️ 位置约束：必须排在 _CREATE_REGISTER_REQUESTS_TABLE **之后**（回填要读它）。
+        _migrate_users_contact(conn)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         # Spec12 §5.1b：存量库补 images.wiki_used 列
@@ -720,13 +836,16 @@ def count_admins() -> int:
 
 # ---------- 写操作 ----------
 
-def create_user(username: str, password_hash: str, is_admin: bool = False) -> dict:
+def create_user(username: str, password_hash: str, is_admin: bool = False,
+                phone: str | None = None, email: str | None = None) -> dict:
+    """建号。phone / email（Spec21 §5.1）只有注册审批路径会传——
+    `POST /api/admin/users`（管理员手工建号）不传，两者落 NULL，前端显示「无」。"""
     try:
         with _connect() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, password_hash, is_admin, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (username, password_hash, 1 if is_admin else 0, _now_iso()),
+                "INSERT INTO users (username, password_hash, is_admin, created_at, phone, email) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (username, password_hash, 1 if is_admin else 0, _now_iso(), phone, email),
             )
             conn.commit()
             user_id = cur.lastrowid
@@ -794,11 +913,18 @@ def delete_user(user_id: int) -> bool:
 
     Spec17 §5.1f 顺序要求：删"该用户帖子上的他人评论"必须排在 `DELETE FROM posts`
     **之前**，否则子查询已经取不到帖子 id。
+
+    Spec21 §2.6 补充：`recharge_requests` 也在级联清单里（但 `register_requests` 不在
+    ——它是审批台账且没有 user_id，理由见 §2.6 的对照表）。
     """
     with _connect() as conn:
         # Spec18 §5.1h：只删账本行，不删 usage 的既有语句（两者都留，各自级联）
         conn.execute("DELETE FROM user_quota WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM usage WHERE user_id = ?", (user_id,))
+        # Spec21 §2.6：充值记录是该用户的业务数据，与它们同类——留一堆 user_id 指向
+        # 不存在用户的挂账记录，只会让管理端列表里出现点不动的行。
+        # （register_requests 相反：它是审批台账且没有 user_id，删号不动它。）
+        conn.execute("DELETE FROM recharge_requests WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM images WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM post_votes WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM feedback WHERE user_id = ?", (user_id,))
@@ -1749,10 +1875,14 @@ def approve_register_request(request_id: int, quota_limit: int) -> dict | None:
     now = _now_iso()
     try:
         with _connect() as conn:
+            # Spec21 §5.1：联系方式直接取申请行（get_register_request(with_secret=True)
+            # 已经把它们带出来了）。手工建号那条路不传，落 NULL。
             cur = conn.execute(
-                "INSERT INTO users (username, password_hash, is_admin, created_at, quota_limit) "
-                "VALUES (?, ?, 0, ?, ?)",
-                (req["username"], req["password_hash"], now, quota_limit),
+                "INSERT INTO users "
+                "(username, password_hash, is_admin, created_at, quota_limit, phone, email) "
+                "VALUES (?, ?, 0, ?, ?, ?, ?)",
+                (req["username"], req["password_hash"], now, quota_limit,
+                 req["phone"], req["email"]),
             )
             user_id = cur.lastrowid
             # 并发判据用 WHERE ... AND status='pending' 的 rowcount，而不是"先查后写"：
@@ -1791,5 +1921,156 @@ def delete_register_request(request_id: int) -> bool:
     """删掉一条申请记录（任意状态）。**不触碰 users**（§5.3）。返回是否有行被删。"""
     with _connect() as conn:
         cur = conn.execute("DELETE FROM register_requests WHERE id = ?", (request_id,))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------- 余额与充值（Spec21 §5.4）----------
+
+def create_recharge_request(user_id: int, username: str, wechat: str, source: str) -> dict:
+    """落一条充值申请。source 必须已在路由层过白名单（本函数只再兜一次底）。
+
+    username 是**提交时刻的快照**：台账要能脱离 users 表被读懂（§2.3）。
+    """
+    if source not in _RECHARGE_SOURCES:
+        raise ValueError(f"未知充值来源: {source}")
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO recharge_requests "
+            "(user_id, username, wechat, source, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (user_id, username, wechat, source, _now_iso()),
+        )
+        conn.commit()
+        request_id = cur.lastrowid
+    return get_recharge_request(request_id)
+
+
+def get_recharge_request(request_id: int) -> dict | None:
+    """按 id 取一条充值记录；不存在返回 None。**没有 with_secret**——本表没有密码。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM recharge_requests WHERE id = ?", (request_id,)
+        ).fetchone()
+    return _recharge_row_to_dict(row)
+
+
+def find_pending_recharge(user_id: int) -> dict | None:
+    """该用户是否已有一条待审批的充值申请（幂等判据，§2.4）。
+
+    只认 pending：被拒绝（比如昵称填错了）之后重新提交是**正常且必要**的路径，
+    已同意的也不拦（加完额度后用户可能还想再充）。
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM recharge_requests WHERE user_id = ? AND status = 'pending' "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    return _recharge_row_to_dict(row)
+
+
+def find_recent_recharge_by_user(user_id: int, window_seconds: int) -> dict | None:
+    """该用户在冷却期内的最近一条充值申请；没有则 None（Spec21 §2.4 的频次限制）。
+
+    与 find_pending_recharge 的区别：那个只看 `status='pending'`，这个**不看状态**。
+    冷却期管的是"提交这个动作"的频次，也就是发信的频次——被拒 / 已同意之后马上
+    再点一次，同样不该再发一封信（那正是刷邮箱的路径）。
+
+    截止时刻的算法与 find_recent_register_by_ip 完全同款（那边有详细理由）：
+    created_at 是 `YYYY-MM-DDTHH:MM:SS.mmmZ`，同格式同宽度的 ISO 串字典序即时间序，
+    所以在 Python 侧算好 cutoff 再交给 SQL 比字符串，**不要**用 SQLite 的 datetime()。
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=window_seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM recharge_requests WHERE user_id = ? AND created_at >= ? "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id, cutoff),
+        ).fetchone()
+    return _recharge_row_to_dict(row)
+
+
+def list_recharge_requests() -> list[dict]:
+    """全部充值记录：**pending 优先**，组内 id 倒序（最新在前）。
+
+    排序写法与 list_register_requests 同款：SQLite 里布尔表达式求值为 0/1。
+    已处理的记录按时间倒序跟在后面——它们是台账，不是待办。
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recharge_requests "
+            "ORDER BY (status = 'pending') DESC, id DESC"
+        ).fetchall()
+    return [_recharge_row_to_dict(r) for r in rows]
+
+
+def approve_recharge_request(request_id: int, amount: int) -> dict | None:
+    """同意：**单事务**内 置 approved + 记 amount + users.quota_limit += amount。
+    返回加完额度后的用户 dict；该行已不是 pending（并发抢跑）时返回 None（调用方转 40904）。
+
+    为什么必须一个事务：先改状态再单独加额度，中间会开出"记录已批准，但额度没到账"
+    的窗口——用户拿着批准记录来找你，而系统显示他没充过。这与 Spec19 §5.2B
+    「建号 + 改状态必须同生同死」是同一类错误。
+
+    **不动 user_quota.used**：它是历史事实（Spec18 §2.2），充值改变的是"还能用多少次"。
+    也**不做上限校验**：取值范围（≥1 且加完不超 QUOTA_LIMIT_MAX）由路由层判。
+
+    并发判据用 `WHERE ... AND status='pending'` 的 rowcount，而不是"先查后写"：
+    两个管理员同时点同意时，后到的那个 UPDATE 影响 0 行 → rollback，额度只加一次。
+    ⚠️ UPDATE recharge 必须排在 UPDATE users **之前**：rowcount 是回滚的判据，
+    而回滚要能撤销已经发生的加额度。
+    """
+    req = get_recharge_request(request_id)
+    if req is None:
+        return None
+    now = _now_iso()
+    with _connect() as conn:
+        marked = conn.execute(
+            "UPDATE recharge_requests SET status = 'approved', reviewed_at = ?, amount = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (now, amount, request_id),
+        )
+        if marked.rowcount == 0:
+            conn.rollback()
+            return None
+        credited = conn.execute(
+            "UPDATE users SET quota_limit = quota_limit + ? WHERE id = ?",
+            (amount, req["user_id"]),
+        )
+        # 第二道 rowcount 检查。正常路径下**到不了这里**：delete_user 会在同一个事务里
+        # 删掉该用户的 recharge_requests 行（§2.6），所以"用户没了但充值行还在"这个
+        # 状态不存在——那时上面的 marked.rowcount 已经是 0。留着它是为了万一将来
+        # 有人改了 delete_user 的级联清单：宁可这次点不动（40904），也绝不能留下
+        # 一条"记录已批准、额度没到账"的挂账（§2.5）。
+        if credited.rowcount == 0:
+            conn.rollback()
+            return None
+        conn.commit()
+    return get_user_by_id(req["user_id"])
+
+
+def reject_recharge_request(request_id: int) -> dict | None:
+    """拒绝：只改状态。该行已不是 pending 时返回 None。**不加额度、不删记录**。"""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE recharge_requests SET status = 'rejected', reviewed_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (_now_iso(), request_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+    return get_recharge_request(request_id)
+
+
+def delete_recharge_request(request_id: int) -> bool:
+    """删掉一条充值记录（任意状态）。**不触碰 users**（§2.6）。
+
+    删除一条**已同意**的记录**不会**把加过的额度收回来——那要走「改限额」。
+    """
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM recharge_requests WHERE id = ?", (request_id,))
         conn.commit()
     return cur.rowcount > 0

@@ -41,12 +41,23 @@
 
     <!-- Spec19 §7.3：注册申请弹窗 -->
     <RegisterModal v-if="showRegister" :config="regCfg" @close="showRegister = false" />
+
+    <!-- Spec21 §7.4：被强制退出 / 登录被拒时，二维码直接弹在登录页上。
+         这是提示语「若您单击登录键则会跳出充值面板」承诺的那块面板，红色提示行
+         （.login-error）与它一个都不能少——没有它那句话就不成立。 -->
+    <RechargeModal
+      v-if="overdraft"
+      mode="overdue"
+      :username="overdraft.username"
+      @close="overdraft = null"
+    />
   </div>
 </template>
 
 <script setup>
 import { onMounted, ref } from 'vue'
 import RegisterModal from './RegisterModal.vue'
+import RechargeModal from './RechargeModal.vue'
 import { getRegisterConfig } from '../api/chatApi'
 import logoUrl from '../assets/logo.svg'
 import { useAuthStore } from '../store/auth'
@@ -61,14 +72,19 @@ const loading = ref(false)
 // Spec19 §7.2：注册弹窗的公开配置（取不到时为 null → 不画注册入口）
 const regCfg = ref(null)
 const showRegister = ref(false)
+// Spec21 §7.4：欠费充值面板。null = 不显示；有值 = 显示，并把其中的 username 预填进账号框
+const overdraft = ref(null)
 
 onMounted(async () => {
-  // Spec18 §7.4：落地到登录页时，若有一条待显示的限额警告 → 红色提示行 + 弹窗。
-  // 用户原话要求"弹出提示警告"，所以是 window.alert（而不是只写一行小字）。
-  const msg = takeQuotaNotice()
-  if (msg) {
-    error.value = msg
-    window.alert(msg)
+  // Spec18 §7.4：落地到登录页时，若有一条待显示的限额警告 → 红色提示行 + 充值面板。
+  // **不用 window.alert**（用户后来改的口径）：alert 是阻断式的，点掉「确定」之前
+  // 用户看不到背后的登录页与充值面板，而且同一句话要说两遍。现在只留红色提示行
+  // （.login-error，#fca5a5），信息一点没少，也不挡路。
+  const notice = takeQuotaNotice()
+  if (notice.message) {
+    error.value = notice.message
+    // Spec21 §7.4：充值面板直接弹出来（username 由被踢时的 App.vue 带过来）
+    overdraft.value = notice
   }
 
   // Spec19 §7.2：静默降级——取不到就不画注册入口、不报错。
@@ -99,8 +115,14 @@ async function submit() {
     await auth.login(username.value.trim(), password.value)
   } catch (e) {
     error.value = e.message || '登录失败'
-    // Spec18 §7.4：超额被拒时同样弹窗（错误对象带 code，见 api/chatApi.js）
-    if (e.code === 40304) window.alert(e.message)
+    // Spec18 §7.4：超额被拒时同样弹窗（错误对象带 code，见 api/chatApi.js）。
+    // 这里就是提示语里那句「若您单击登录键则会跳出充值面板」的落点——所以这一支
+    // **必须**把面板弹出来，否则那句话就是空头支票。同样不用 window.alert。
+    if (e.code === 40304) {
+      // 登录被拒（而不是从系统内被踢）时也弹充值面板。
+      // 这里没有 store 里的 username 可用（还没登录成功），就拿用户刚敲进去的那个。
+      overdraft.value = { message: e.message, username: username.value.trim() }
+    }
   } finally {
     loading.value = false
   }

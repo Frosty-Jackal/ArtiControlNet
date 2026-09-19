@@ -14,7 +14,6 @@
 
       <template v-else>
         <h2 class="reg-title">新用户注册</h2>
-        <p class="reg-lead">提交后由管理员审核开通，账号会在审核通过后创建。</p>
 
         <form class="reg-form" @submit.prevent="submit">
           <label class="reg-label">账号 <b class="reg-star">*</b></label>
@@ -34,9 +33,11 @@
             <img class="reg-qr" :src="config.qr_url" alt="收款码" />
           </div>
 
-          <label class="reg-label">支付备注 <b class="reg-star">*</b></label>
-          <input v-model="wechat" class="login-input"
-                 placeholder="用于支付的微信昵称（便于我们核对）" autocomplete="off" />
+          <!-- 标签直接用完整的那句话（与 RechargeModal 同一次改版），占位提示随之删掉。
+               注意此处用词是「以便后台核对」，充值面板那份是「便于我们核对」——
+               两处**故意不同**，是用户分别给的原文，别顺手"统一"。 -->
+          <label class="reg-label">用于支付的微信昵称（以便后台核对） <b class="reg-star">*</b></label>
+          <input v-model="wechat" class="login-input" autocomplete="off" />
 
           <p class="reg-note">{{ config.daily_notice }}</p>
           <p v-if="error" class="login-error">{{ error }}</p>
@@ -79,7 +80,8 @@ async function submit() {
   // 手机号 11 位、邮箱 @ 位置这些**不在前端复制**：它们各有自己的中文 message，
   // 已经在后端（40018）实现了一份，前端再抄一份就是第二个会漂移的副本。
   if (!username.value.trim() || !password.value || !wechat.value.trim()) {
-    error.value = '请填写账号、密码与支付备注'
+    // 跟标签走：那个字段已经不叫「支付备注」了，报错文案不能还叫旧名字
+    error.value = '请填写账号、密码与微信昵称'
     return
   }
   if (!phone.value.trim() && !email.value.trim()) {

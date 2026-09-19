@@ -47,7 +47,12 @@
         </button>
         <button v-if="!wikiEditing" class="btn-mini" @click="openEdit">编辑</button>
       </div>
-      <p class="wiki-hint">更新会逐张分析个人作品（之前已分析过则不会分析），请耐心等待</p>
+      <!-- Spec21 §7.6：这句话是"分析中"的说明，与按钮上的「分析中…」同一个生命周期。
+           常驻展示是噪音；分析结束（成功或失败）后它还留着就是死字。
+           wikiBusy 由 refreshStyle() 自己置位与复位，本行不改它一个字。 -->
+      <p v-if="wikiBusy" class="wiki-hint">
+        更新会逐张分析个人作品（之前已分析过则不会分析），请耐心等待
+      </p>
 
       <!-- 编辑态：就地改风格，保存即覆盖（旧版落进「上次更新前」） -->
       <div v-if="wikiEditing" class="wiki-edit">

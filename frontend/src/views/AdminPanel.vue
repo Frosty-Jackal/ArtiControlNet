@@ -10,6 +10,7 @@
       当前登录：{{ auth.username }}（{{ auth.isAdmin ? '管理员' : '普通用户' }}）
       · 账号可由管理员创建，或由用户申请后审批开通
       · <b class="tip-pending">待审批注册申请 {{ pendingCount }} 条</b>
+      · <b class="tip-pending">待审批充值 {{ pendingRechargeCount }} 条</b>
     </p>
 
     <!-- 创建账号 -->
@@ -43,6 +44,7 @@
             <th>ID</th>
             <th>用户名</th>
             <th>角色</th>
+            <th>联系方式</th>
             <th>服务总调用次数</th>
             <th>服务限额</th>
             <th>创建时间</th>
@@ -61,6 +63,8 @@
                 {{ u.is_admin ? '管理员' : '普通' }}
               </span>
             </td>
+            <!-- Spec21 §7.2：联系方式（邮箱 / 电话，都没有 → 「无」） -->
+            <td class="cell-contact">{{ contactText(u) }}</td>
             <!-- Spec18 §7.5b：超额只打标记，不整行变红（那会让表格看起来全是错的） -->
             <td class="cell-quota">
               {{ u.used }}
@@ -78,7 +82,8 @@
                 </button>
               </template>
             </td>
-            <td class="cell-muted">{{ u.created_at }}</td>
+            <!-- Spec21 §7.2：北京时间（后端另给的 created_at_beijing，created_at 本身没被改） -->
+            <td class="cell-muted">{{ u.created_at_beijing }}</td>
             <td class="row-actions">
               <button class="btn-mini" :disabled="busyId === u.id" @click="resetPassword(u)">
                 重置密码
@@ -116,7 +121,7 @@
           <span class="reg-row-cell">手机号：{{ r.phone || '—' }}</span>
           <span class="reg-row-cell">邮箱：{{ r.email || '—' }}</span>
           <span class="reg-row-cell">支付微信：{{ r.wechat }}</span>
-          <span class="reg-row-cell reg-row-time">{{ r.created_at }}</span>
+          <span class="reg-row-cell reg-row-time">{{ r.created_at_beijing }}</span>
         </div>
 
         <div class="reg-row-actions">
@@ -134,18 +139,50 @@
         </div>
       </div>
     </section>
+
+    <!-- Spec21 §7.2：充值台账（结构照抄上面的注册申请块）。
+         同样 pending 在前、已处理的原样留在下方——它是台账，不是待办。 -->
+    <section class="reg-admin">
+      <h3 class="reg-admin-title">待审批充值记录</h3>
+      <p v-if="recharges.length === 0" class="reg-admin-empty">暂无充值申请</p>
+
+      <div v-for="c in recharges" :key="c.id" class="reg-row">
+        <div class="reg-row-info">
+          <span class="reg-row-user">{{ c.username }}</span>
+          <span class="reg-row-cell">微信昵称：{{ c.wechat }}</span>
+          <span class="reg-row-cell">{{ c.source === 'overdue' ? '欠费充值' : '主动充值' }}</span>
+          <span v-if="c.amount !== null" class="reg-row-cell">加 {{ c.amount }} 次</span>
+          <span class="reg-row-cell reg-row-time">{{ c.created_at_beijing }}</span>
+        </div>
+
+        <div class="reg-row-actions">
+          <template v-if="c.status === 'pending'">
+            <button class="btn-mini" :disabled="busyRechargeId === c.id" @click="approveRecharge(c)">同意</button>
+            <button class="btn-mini" :disabled="busyRechargeId === c.id" @click="rejectRecharge(c)">拒绝</button>
+          </template>
+          <span v-else class="reg-row-done">{{ c.status === 'approved' ? '已同意' : '已拒绝' }}</span>
+          <button class="btn-mini danger" :disabled="busyRechargeId === c.id" @click="removeRecharge(c)">
+            删除
+          </button>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import {
+  approveRechargeRequest,
   approveRegisterRequest,
   createUser,
+  deleteRechargeRequest,
   deleteRegisterRequest,
   deleteUser,
+  listRechargeRequests,
   listRegisterRequests,
   listUsers,
+  rejectRechargeRequest,
   rejectRegisterRequest,
   resetUserPassword,
   setUserAdmin,
@@ -171,6 +208,13 @@ const pendingCount = computed(
   () => requests.value.filter((r) => r.status === 'pending').length
 )
 
+// Spec21 §7.2：充值台账（同款：pending 在前，后端已排好序）
+const recharges = ref([])
+const busyRechargeId = ref(null)
+const pendingRechargeCount = computed(
+  () => recharges.value.filter((c) => c.status === 'pending').length
+)
+
 async function load() {
   try {
     users.value = await listUsers()
@@ -185,6 +229,21 @@ async function loadRequests() {
   } catch (e) {
     error.value = e.message || '加载注册申请失败'
   }
+}
+
+async function loadRecharges() {
+  try {
+    recharges.value = await listRechargeRequests()
+  } catch (e) {
+    error.value = e.message || '加载充值记录失败'
+  }
+}
+
+// Spec21 §7.2：邮箱与电话都显示（有哪个显示哪个），都没有 → 「无」。
+// 顺序固定「邮箱 / 电话」——邮箱是邮件主题里优先取的那个（Spec21 §2.7）。
+function contactText(u) {
+  const parts = [u.email, u.phone].filter(Boolean)
+  return parts.length ? parts.join(' / ') : '无'
 }
 
 function flash(msg) {
@@ -233,9 +292,10 @@ async function resetPassword(u) {
   }
 }
 
-// Spec18 §7.5：超额的判据与后端一致（used >= quota_limit），管理员恒不超额
+// Spec21 §5.7：判据与后端一致（used > quota_limit），管理员恒不超额。
+// 注意是 `>` 不是 `>=`：限额用满（used == limit）还能再用一次（Spec21 §2.8）。
 function isOverQuota(u) {
-  return !u.is_admin && u.used >= u.quota_limit
+  return !u.is_admin && u.used > u.quota_limit
 }
 
 // Spec18 §7.5：改服务限额（window.prompt，与隔壁「重置密码」同款交互）
@@ -372,9 +432,76 @@ async function removeRequest(r) {
   }
 }
 
-// 并行拉两张表
+// ---- Spec21 §7.2：充值的三个处理动作 ----
+
+// 同意 = 弹框填次数（与「同意注册申请」逐字同款交互）。
+// **不传 prompt 的第二个参数**（不给默认值）：次数该由管理员按实收金额决定，
+// 写死任何数字都是复制一个会漂移的常量（与 Spec19 §7.5c 同款理由）。
+async function approveRecharge(c) {
+  const input = window.prompt(
+    `同意「${c.username}」的充值申请，并填写加多少次服务额度：`
+  )
+  if (input === null) return                       // 取消
+  const raw = input.trim()
+  const n = Number(raw)
+  // 与 editQuota / approve 同样的三个坑（Spec19 §7.5c）：raw 为空必须单独拦
+  // （Number('') === 0 是整数）；用 Number.isInteger 而非 parseInt
+  // （parseInt('10abc') 会静默变成 10）；上限交给后端 40017 报。
+  // 下界是 **1 不是 0**：加 0 次是一次无意义的点击，几乎必然是手滑（§2.5）。
+  if (!raw || !Number.isInteger(n) || n < 1) {
+    error.value = '充值次数需为不小于 1 的整数'
+    return
+  }
+  error.value = ''
+  busyRechargeId.value = c.id
+  try {
+    await approveRechargeRequest(c.id, n)
+    flash(`已为「${c.username}」充值 ${n} 次`)
+    // 影响两处数据：台账少一条待办，用户表格那一行的额度变了
+    await loadRecharges()
+    await load()
+  } catch (e) {
+    error.value = e.message || '充值失败'
+  } finally {
+    busyRechargeId.value = null
+  }
+}
+
+async function rejectRecharge(c) {
+  if (!window.confirm(`确定拒绝「${c.username}」的充值申请？`)) return
+  error.value = ''
+  busyRechargeId.value = c.id
+  try {
+    await rejectRechargeRequest(c.id)
+    flash(`已拒绝「${c.username}」的充值申请`)
+    await loadRecharges()
+  } catch (e) {
+    error.value = e.message || '操作失败'
+  } finally {
+    busyRechargeId.value = null
+  }
+}
+
+async function removeRecharge(c) {
+  // 确认文案必须点明"不收回额度"——删记录 ≠ 撤销充值（Spec21 §2.6）
+  if (!window.confirm('确定删除这条充值记录？此操作不可撤销，且不会收回已加的服务额度。')) return
+  error.value = ''
+  busyRechargeId.value = c.id
+  try {
+    await deleteRechargeRequest(c.id)
+    flash('已删除该条充值记录')
+    await loadRecharges()
+  } catch (e) {
+    error.value = e.message || '删除失败'
+  } finally {
+    busyRechargeId.value = null
+  }
+}
+
+// 并行拉三张表
 onMounted(() => {
   load()
   loadRequests()
+  loadRecharges()
 })
 </script>

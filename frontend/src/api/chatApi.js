@@ -152,7 +152,8 @@ export async function me() {
 
 export async function listUsers() {
   const { data } = await http.get('/api/admin/users')
-  // [{ id, username, is_admin, created_at, quota_limit, used }]（Spec18 §6.1，无 password_hash）
+  // [{ id, username, is_admin, created_at, created_at_beijing, quota_limit, used,
+  //    phone, email }]（Spec18 §6.1 + Spec21 §7.2，无 password_hash）
   return data.data
 }
 
@@ -224,6 +225,49 @@ export async function rejectRegisterRequest(id) {
 
 export async function deleteRegisterRequest(id) {
   const { data } = await http.delete(`/api/admin/register-requests/${id}`)
+  return data.data // { id }
+}
+
+// ---- 余额与充值（Spec21 §6）----
+// 拦截器不用改：/api/auth/recharge-request 是公开端点，它的失败码是 40019/40904，
+// 既不是 401 也不是 40304，不会误触发登出分支（与 Spec19 §6.8 对 40305 的处理同一个判断）。
+
+export async function getRechargeInfo() {
+  const { data } = await http.get('/api/recharge/info')
+  // { balance, quota_limit, used, qr_url, price_notice }
+  return data.data
+}
+
+export async function submitRecharge(wechat) {
+  const { data } = await http.post('/api/recharge/requests', { wechat })
+  return data.data // { id }
+}
+
+export async function submitOverdueRecharge(username, wechat) {
+  const { data } = await http.post('/api/auth/recharge-request', { username, wechat })
+  return data.data // { id }
+}
+
+export async function listRechargeRequests() {
+  const { data } = await http.get('/api/admin/recharge-requests')
+  // [{ id, user_id, username, wechat, source, status, amount,
+  //    created_at, created_at_beijing, reviewed_at, reviewed_at_beijing? }]
+  // pending 优先、组内 id 倒序；**无** ip（Spec21 §6.5）
+  return data.data
+}
+
+export async function approveRechargeRequest(id, amount) {
+  const { data } = await http.post(`/api/admin/recharge-requests/${id}/approve`, { amount })
+  return data.data // { id, username, quota_limit, used }
+}
+
+export async function rejectRechargeRequest(id) {
+  const { data } = await http.post(`/api/admin/recharge-requests/${id}/reject`)
+  return data.data // { id }
+}
+
+export async function deleteRechargeRequest(id) {
+  const { data } = await http.delete(`/api/admin/recharge-requests/${id}`)
   return data.data // { id }
 }
 
