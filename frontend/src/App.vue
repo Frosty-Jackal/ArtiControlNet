@@ -43,7 +43,7 @@
         </button>
         <!-- Spec21 §7.1：余额与充值（仅普通用户）。管理员 used/quota_limit 照常累计
              但不参与判定，给他显示一个无业务含义的余额是误导（§2.9）。 -->
-        <button v-if="!auth.isAdmin" class="btn-clear" @click="showRecharge = true">
+        <button v-if="!auth.isAdmin" class="btn-clear" @click="openRecharge">
           余额与充值
         </button>
         <button class="btn-clear" title="使用帮助" @click="showHelp = !showHelp">帮助</button>
@@ -103,6 +103,7 @@ import SuggestionPanel from './views/SuggestionPanel.vue'
 import HelpModal from './views/HelpModal.vue'
 import RechargeModal from './views/RechargeModal.vue'
 import { setQuotaUsername } from './utils/quotaNotice'
+import { trackClick } from './utils/track'
 
 const auth = useAuthStore()
 auth.init()
@@ -146,13 +147,24 @@ function closeOtherPanels(keep) {
     if (k !== keep) v.value = false
   })
 }
+// Spec22 §7.4：三个埋点插在这三个函数的开头（保持"所有入口逻辑都在这个函数里"的现状）。
+// **只计"打开"**：toggleGallery 在"返回聊天"那一次也会被调用，于是同一个 IP 会被再报
+// 一遍——而 IP 去重让它在库里不产生任何影响（§2.9），这正是选 IP 去重而不是"计数"的好处。
+// **不需要**在这里判断"是打开还是关闭"。
 function toggleGallery() {
+  trackClick('gallery')
   showGallery.value = !showGallery.value
   if (showGallery.value) closeOtherPanels('gallery')
 }
 function toggleCommunity() {
+  trackClick('community')
   showCommunity.value = !showCommunity.value
   if (showCommunity.value) closeOtherPanels('community')
+}
+// 余额与充值：它是 overlay（不参与面板互斥），直接置 true
+function openRecharge() {
+  trackClick('recharge')
+  showRecharge.value = true
 }
 function toggleSuggestions() {
   showSuggestions.value = !showSuggestions.value

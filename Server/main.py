@@ -28,11 +28,15 @@ import media
 import schemas
 import shares
 import timefmt
+import verifications
 import wiki
 from agents.supervisor import run_supervisor
 from errors import (AppError, AuthTokenError, BadRequestError,
-                    CommentContentError, CredentialsFormatError,
-                    DuplicateUsernameError, FeedbackParamError, FileMissingError,
+                    ClickEventError, CommentContentError, CredentialsFormatError,
+                    DuplicateUsernameError, EmailCodeRateLimitedError,
+                    EmailCodeRejectedError, EmailCodeRequestError,
+                    EmailServiceUnavailableError, FeedbackParamError,
+                    FileMissingError,
                     ForbiddenError,
                     GalleryItemNotFoundError, LoginFailedError,
                     LoginRateLimitedError, NotFoundError, PaymentQrMissingError,
@@ -41,7 +45,7 @@ from errors import (AppError, AuthTokenError, BadRequestError,
                     RechargeNotFoundError, RechargeRateLimitedError,
                     RechargeRequestError,
                     RegisterAlreadyReviewedError,
-                    RegisterClosedError, RegisterRateLimitedError,
+                    RegisterClosedError,
                     RegisterRequestError, RegisterRequestNotFoundError,
                     ShareNotFoundError, SuggestionContentError,
                     SuggestionNotFoundError, UnsupportedImageTypeError,
@@ -314,18 +318,30 @@ app.add_middleware(
 
 # ---------- 统一鉴权中间件（Spec2 §6.2）----------
 
-# 放行列表：除登录、注册链路与欠费充值外，所有 /api 接口都需登录态（Spec19 §6.8 / Spec21 §6.3）。
-# 这五条是**精确匹配**（`path not in PUBLIC_AUTH_PATHS`），不是前缀匹配——
+# 放行列表：除登录、注册链路、欠费充值、邮箱验证码与点击埋点外，所有 /api 接口
+# 都需登录态（Spec19 §6.8 / Spec21 §6.3 / Spec22 §6.9）。
+# 这十条是**精确匹配**（`path not in PUBLIC_AUTH_PATHS`），不是前缀匹配——
 # 新增路径时必须原样写全，别写成 /api/auth/register 就以为能覆盖 -config。
 PUBLIC_AUTH_PATHS = {
     "/api/auth/login",
-    "/api/auth/register",        # Spec19：提交注册申请（无登录态）
+    "/api/auth/register",        # Spec19：提交注册申请（Spec22 起内部要验证码，但仍公开）
     "/api/auth/register-config", # Spec19：注册弹窗的公开配置
     "/api/auth/payment-qr",      # Spec19：收款码图片
     # Spec21：欠费充值申请。用户此时正被 40304 拦在门外，手里没有 token；
     # 它只能产生一条**待审批**记录，不能给任何人加额度（§3.3-2）。
     "/api/auth/recharge-request",
+    # Spec22 新增 5 条
+    "/api/auth/email-code",      # 发验证码（用户此刻必然没有 token）
+    "/api/auth/verify-email-code",  # 校验验证码（改密码的前置）
+    "/api/auth/login-by-email",  # 邮箱登录（就是用来拿 token 的）
+    "/api/auth/reset-password",  # 自助改密码（忘了密码的人没有 token）
+    "/api/click",                # 点击埋点（「打开登录页」发生时用户还没 token）
 }
+
+# ⚠️ 中间件对白名单里的路径**不判限额**——所以 /api/auth/login-by-email 必须
+# **自己**判 40304（Spec22 §6.4）：漏了它，一个已经欠费被拦的用户只要用邮箱登录
+# 就能绕过去。这与 /api/auth/login 的处境完全一样（Spec21 §5.7 的四处副本之一
+# 就在登录路由里）。
 
 
 def _bearer_token(request: Request) -> str:
@@ -1039,6 +1055,122 @@ async def admin_delete_suggestion(suggestion_id: int, request: Request,
     return _ok({"id": suggestion_id})
 
 
+# ---------- 邮箱验证码 / 入口埋点的工具（Spec22 §2.8 / §5.7）----------
+# 四个校验点（注册提交 / verify-email-code / login-by-email / reset-password）
+# 共用下面这几个函数——**一份规则，一个地方**（§2.6 要求"限速口径只有一份"）。
+
+def _norm_email(raw: Optional[str]) -> str:
+    """邮箱规范化：`strip()` + `lower()`。**全仓唯一的邮箱规则**（§2.8）。
+
+    手机键盘会自动把首字母大写：用户注册时打的是 `Zhang@qq.com`、改密码时打的是
+    `zhang@qq.com`，不规范化就是"同一个人在系统里有两个邮箱"——改密码说他
+    "还未注册"，注册又说"已注册账号 zhang"，这类故障用户根本描述不清。
+
+    db 层**不做**隐式转换：与其它字段的 strip 放在一起，规则只在这一处
+    （Spec19 对手机号 / 邮箱格式的处理就是这个立场）。
+    """
+    return (raw or "").strip().lower()
+
+
+def _email_ok(email: str) -> bool:
+    """邮箱格式：含 `@`、`@` 前后都有内容、长度 ≤128（Spec19 §6.2 的原判据）。"""
+    if not email or len(email) > 128 or "@" not in email:
+        return False
+    local, _, domain = email.partition("@")
+    return bool(local) and bool(domain)
+
+
+def _code_ok(code: str) -> bool:
+    """验证码形态：4 位**半角**数字（长度是契约，见 `verifications.CODE_LENGTH`）。
+
+    多一个 `isascii()` 而不是只用 `isdigit()`：`'１２３４'.isdigit()` 是 `True`，
+    全角数字能过格式校验、却永远比不上库里的半角码——用户只会看到"验证码错误"
+    而完全不知道该改什么。这类"看着对、其实不对"的输入没有理由放进来。
+    """
+    return (len(code) == verifications.CODE_LENGTH
+            and code.isascii() and code.isdigit())
+
+
+def _reject_if_rate_limited(ip: str, request_id: str, purpose: str) -> None:
+    """入口限速（Spec22 §2.6）：猜验证码与猜密码是同一件事，共用 Spec2 的计数器。
+
+    `auth.is_login_blocked` / `record_login_failure` 的函数名保留 `login_*` 不改
+    （改名要让 main.py 四处调用点 + Spec2 文档全线对不上），语义已写在它的 docstring 里。
+
+    `purpose` 是**外部输入**，所以只把白名单内的值写进日志——否则这个字段会变成
+    一个可以塞任意字符串的地方（Spec19 §10 的"不拼接外部输入"同一原则）。
+    """
+    if auth.is_login_blocked(ip):
+        logger.warning("验证码尝试过于频繁", extra={
+            "event": "auth.login_failed", "request_id": request_id,
+            "purpose": purpose if purpose in verifications.PURPOSES else "unknown",
+        })
+        raise LoginRateLimitedError()
+
+
+def _verify_code(request_id: str, ip: str, email: str, purpose: str, code: str) -> None:
+    """校验验证码；**失败即记一次登录限速**并抛 40020。四个校验点共用（§2.6）。
+
+    为什么失败要计数：4 位数字只有 9000 种可能，10 分钟 TTL 内不限次数地猜，
+    一个脚本几分钟就能撞开任意一个已知邮箱的账号——这是邮箱登录这条通道自己
+    开出来的洞。5 次 / 5 分钟 / IP 之后撞中概率降到 < 0.12%（§2.6）。
+
+    ⚠️ 日志里**绝不带 `code`**（它是凭据）、**绝不带 `email`**（PII）——两者都
+    只记 `purpose`（§10.2）。失败那条**每次都要记**：它是爆破的指纹。
+    """
+    if db.match_email_verification(email, purpose, code, config.EMAIL_CODE_TTL_SECONDS):
+        logger.info("验证码校验通过", extra={
+            "event": "email_code.verified", "request_id": request_id,
+            "purpose": purpose,
+        })
+        return
+    auth.record_login_failure(ip)      # 失败的**唯一**处理点，别在调用方再记一次
+    logger.warning("验证码校验失败", extra={
+        "event": "email_code.verify_failed", "request_id": request_id,
+        "purpose": purpose,
+    })
+    raise EmailCodeRequestError("验证码错误或已过期")
+
+
+def _reject_duplicate_email(email: str, purpose: str, request_id: str) -> None:
+    """发码前的查重（Spec22 §2.4 那张表）。命中即记 `email_code.rejected` 并抛 40907。
+
+    | purpose | 判据 | 结果 |
+    |---|---|---|
+    | `register` | 邮箱已在 `users` | 40907「已注册账号{username}，请前往登录界面…」 |
+    | `register` | 已有 `pending` 申请 | 40907「该邮箱已提交过注册申请，请等待管理员审批」 |
+    | `login` / `reset` | 邮箱不在 `users` | 40907「还未注册，请宝子前往新用户注册~」 |
+
+    三句话共用一个码（40907）：前端本来也不需要知道是哪一种，显示 message 就完了。
+    文案**全部来自 config**，前端零副本（与 QUOTA_EXCEEDED_MESSAGE 同一原则）。
+
+    ⚠️ 第一句会**泄露用户名**给任何知道这个邮箱的人——这是用户明确要的文案
+    （匿掉用户名会让"去登录、密码忘了就去改密码"这半句失去用处），
+    已记入 §3.3-3，**知悉并接受**，不要"顺手脱敏"。
+    """
+    if purpose == "register":
+        user = db.get_user_by_email(email)
+        if user is not None:
+            reason = "registered"
+            message = config.EMAIL_CODE_REGISTERED_NOTICE.format(username=user["username"])
+        elif db.find_pending_register_by_email(email) is not None:
+            # 删掉 IP 冷却之后，这是"同一个人反复提交、你反复收到同一份审批邮件"
+            # 的**唯一**闸门（§2.4）。别把它当成可有可无的一层。
+            reason, message = "pending", config.EMAIL_CODE_PENDING_NOTICE
+        else:
+            return
+    elif db.get_user_by_email(email) is None:
+        reason, message = "unregistered", config.EMAIL_CODE_UNREGISTERED_NOTICE
+    else:
+        return
+
+    logger.info("发码被查重拒绝", extra={
+        "event": "email_code.rejected", "request_id": request_id,
+        "purpose": purpose, "reason": reason,
+    })
+    raise EmailCodeRejectedError(message)
+
+
 # ---------- 认证 / 用户管理（Spec2 §6）----------
 
 @app.post("/api/auth/login")
@@ -1103,13 +1235,16 @@ async def register_config(request: Request):
 
     qr_url 用 _public_base 拼**绝对地址**（与作品/分享图一致），前端直接用，
     不做任何拼接，这样 VITE_API_BASE 的独立部署场景也不用管。
+
+    Spec22 §2.11：**去掉了 `daily_notice`**（「每人每天只能申请一个账号…」那条规则
+    已随 IP 冷却一起删除）。留着一个描述不存在规则的字段，就是界面上继续承诺它。
+    其余键一个不动——尤其是 qr_url / price_notice，欠费充值面板还复用着它们。
     """
     return _ok({
         "enabled": config.REGISTER_ENABLED,
         "contact_email": config.SUPPORT_EMAIL,
         "qr_url": f"{_public_base(request)}/api/auth/payment-qr",
         "price_notice": config.REGISTER_PRICE_NOTICE,
-        "daily_notice": config.REGISTER_DAILY_NOTICE,
     })
 
 
@@ -1135,14 +1270,24 @@ async def payment_qr():
 async def register_request(payload: schemas.RegisterRequestCreate, request: Request,
                            background_tasks: BackgroundTasks,
                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
-    """提交注册申请（Spec19 §6.2）：**落一条申请，不创建任何用户**。
+    """提交注册申请（Spec22 §6.1，Spec19 §6.2 的改造版）：**落一条申请，不创建任何用户**。
 
-    校验顺序即契约（顺序变了，用户体验就变了）：格式 → 用户名占用 → IP 冷却。
-    格式全部排在冷却之前，否则一个手滑把手机号打成 10 位的用户会被直接锁 24 小时。
-    bcrypt 排在最后：它是故意慢的（约 100 ms 量级），没有理由在一条注定要被拒的
-    请求上做它。
+    校验顺序即契约（顺序变了，用户体验就变了）：格式 → 验证码 → 用户名占用。
+    **删掉的两条**：原来的"手机号与邮箱至少一项"与"手机号 11 位"（表单里没有电话了），
+    以及"同 IP 24 小时冷却"（需求 3 删掉了这条限制，40902 一并退休）。
+
+    ⚠️ 顺序上有一处刻意：**查重（第 8 条）排在验证码校验（第 9 条）之前**。
+    它不泄露任何新东西——`/api/auth/email-code` 那条路本来就会把同一句话说给任何
+    知道这个邮箱的人（§3.3-3）；而对**填错邮箱的正常用户**，这个提示有用得多。
     """
     request_id = _request_id(x_request_id)
+    ip = auth.client_ip(request)
+
+    # ⓪ 限速（§2.6）。§6.1 的 14 条清单里没有列它，但 §2.6 把注册的码校验明确点名为
+    #    "四个校验点"之一，而限速的完整机制是**两半**：入口判 42901 + 失败计数。
+    #    只记不判的话，被限速的人换到这条路由就能继续猜码——同一个码、同一个
+    #    oracle，绕过去只需要换一个 URL。所以这里补上入口判定。
+    _reject_if_rate_limited(ip, request_id, "register")
 
     # ① 开关
     if not config.REGISTER_ENABLED:
@@ -1152,63 +1297,276 @@ async def register_request(payload: schemas.RegisterRequestCreate, request: Requ
     username = (payload.username or "").strip()
     password = payload.password or ""
     wechat = (payload.wechat or "").strip()
-    phone = (payload.phone or "").strip()
-    email = (payload.email or "").strip()
+    email = _norm_email(payload.email)      # Spec22 §2.8：strip + lower 一条规则
+    code = (payload.code or "").strip()
     if not 2 <= len(username) <= 32:
         raise RegisterRequestError("用户名需为 2~32 个字符")
-    if not 6 <= len(password) <= 72:
-        raise RegisterRequestError("密码需为 6~72 位")
-    if not wechat or len(wechat) > 64:
+    if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
+        raise RegisterRequestError(
+            f"密码需为 {auth.MIN_PASSWORD_LEN}~{auth.MAX_PASSWORD_LEN} 位"
+        )
+    if not wechat or len(wechat) > config.RECHARGE_WECHAT_MAX:
         raise RegisterRequestError("请填写用于支付的微信昵称")
-    if not phone and not email:
-        raise RegisterRequestError("手机号与邮箱请至少填写一项")
-    if phone and (not phone.isdigit() or len(phone) != 11):
-        raise RegisterRequestError("手机号需为 11 位数字")
-    if email and ("@" not in email or not email.split("@")[0]
-                  or not email.split("@")[-1] or len(email) > 128):
+    if not _email_ok(email):
         raise RegisterRequestError("邮箱格式不正确（需包含 @，且 @ 前后都有内容）")
+    if not _code_ok(code):
+        raise RegisterRequestError("请填写 4 位数字验证码")
 
-    # ⑧ 用户名占用（**只是提前告知**：真正的唯一性约束仍是 users.username 的
+    # ⑧ 邮箱已注册（提交时**再查一遍**：从发码到提交隔着几分钟，中间可能有人
+    #    先注册了同一个邮箱，这是最后的闸门，用的是同一句话，§2.4）
+    existing = db.get_user_by_email(email)
+    if existing is not None:
+        raise EmailCodeRejectedError(
+            config.EMAIL_CODE_REGISTERED_NOTICE.format(username=existing["username"])
+        )
+
+    # ⑨ 验证码（注册也是一条公开的猜码入口，所以这里的失败**计入登录限速**，§2.6）
+    _verify_code(request_id, ip, email, "register", code)
+
+    # ⑩ 用户名占用（**只是提前告知**：真正的唯一性约束仍是 users.username 的
     #    UNIQUE 索引，在管理员点同意那一刻兜底，见 §3.3-2）
     if db.get_user_by_username(username) is not None:
         raise DuplicateUsernameError()
 
-    # ⑨ 同 IP 24 小时冷却（滚动窗口，判据见 §2.2）
-    ip = auth.client_ip(request)
-    if db.find_recent_register_by_ip(ip, config.REGISTER_IP_WINDOW_SECONDS) is not None:
-        # 日志里**不记 IP**——它已经存在库里（判重必需），再往日志里抄一份只是
-        # 让排障截图变成一次额外的信息泄露（§10）。
-        logger.warning("注册申请被冷却拒绝", extra={
-            "event": "auth.register_blocked", "request_id": request_id,
-            "username": username,
-        })
-        raise RegisterRateLimitedError()
-
-    # ⑩ 落库（密码在提交时就 bcrypt，库里全程没有明文）
+    # ⑪ 落库（密码在提交时就 bcrypt，库里全程没有明文；不再有 ip）
     record = db.create_register_request(
         username, auth.hash_password(password),
-        phone or None, email or None,   # 空串存 NULL："没填"只有一种表示
-        wechat, ip,
+        email, wechat,
     )
     logger.info("收到注册申请", extra={
         "event": "auth.register_submitted", "request_id": request_id,
         "register_id": record["id"], "username": username,
-        "has_phone": bool(phone), "has_email": bool(email),
+        "has_email": True,       # Spec22：邮箱必填，不再是"有没有填"
     })
 
     # Spec20：新申请邮件通知。在 return **之前**注册任务（否则任务不会被登记），
     # 但它在响应发出**之后**才跑——注册接口的耗时一秒都不涨。
-    # 联系方式邮箱优先，没有才用手机号（Spec20 §2.3）；`or "未填写"` 是纯防御，
-    # 上面的格式校验（手机号与邮箱至少一项）已保证正常路径不可达。
+    # Spec22 §5.1：联系方式恒为邮箱（「未填写」这个回落已随手机号一起消失）。
     background_tasks.add_task(
         mailer.send_register_notification,
         username,
-        email or phone or "未填写",
+        email,
         wechat,                      # Spec21 §2.7：正文前缀「微信充值账号是…，」
         record["created_at"],
     )
 
     return _ok({"id": record["id"]})
+
+
+# ---------- 邮箱验证码 / 邮箱登录 / 自助改密码 / 入口埋点（Spec22 §6.2 ~ §6.6）----------
+# 五条**全部公开**（PUBLIC_AUTH_PATHS，§6.9）：来用它们的人必然还没有 token。
+# ⚠️ 中间件对白名单里的路径**不判限额**，所以 login-by-email 必须自己判 40304。
+
+@app.post("/api/auth/email-code")
+async def request_email_code(payload: schemas.EmailCodeRequest, request: Request,
+                             background_tasks: BackgroundTasks,
+                             x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """发一封 4 位验证码到该邮箱（Spec22 §6.2）。**公开**。
+
+    校验顺序即契约：**可预知的服务故障 → 格式 → 频率 → 业务规则**（§6.2）。
+    冷却排在查重之前：一个被拒的邮箱反复点「获取验证码」会一直撞 40907，这没问题；
+    但顺序反过来的话，连点的人会因为走到哪个分支不同而看到交替的提示。
+
+    **绝不回显 `code`**（任何情况下，§2.2）：它是凭据，只有收件箱里有。
+    """
+    request_id = _request_id(x_request_id)
+    email = _norm_email(payload.email)
+    purpose = (payload.purpose or "").strip()
+
+    # ① 未配 SMTP：唯一**可以预知**的失败，在花钱 / 落库之前拦掉（§2.5）。
+    #    与 Spec20/21 的"静默降级"立场刻意不同——那两次邮件只是通知（不发不影响
+    #    业务），而验证码是业务的前置条件，静默降级在这里的含义是"接口 200、用户傻等"。
+    if not config.SMTP_PASSWORD:
+        raise EmailServiceUnavailableError()
+
+    # ② 邮箱格式 ③ 场景白名单（不拼接外部输入，本仓的既有做法）
+    if not _email_ok(email):
+        raise EmailCodeRequestError("邮箱格式不正确（需包含 @，且 @ 前后都有内容）")
+    if purpose not in verifications.PURPOSES:
+        raise EmailCodeRequestError("未知的验证场景")
+
+    # ④ 同一邮箱 + 同一场景的重发冷却（按 (email, purpose) 隔离：给"注册"发的码
+    #    与给"登录"发的码是两个独立的窗口，互不影响，§2.2）
+    if db.find_recent_email_verification(
+            email, purpose, config.EMAIL_CODE_RESEND_SECONDS) is not None:
+        logger.info("发码被冷却拒绝", extra={
+            "event": "email_code.rate_limited", "request_id": request_id,
+            "purpose": purpose,
+        })
+        raise EmailCodeRateLimitedError()
+
+    # ⑤ 查重（§2.4 的表）
+    _reject_duplicate_email(email, purpose, request_id)
+
+    # ⑥ 生成 + 落库 ⑦ 发信入队 ⑧ 回 {"sent": true}
+    code = verifications.generate_code()
+    db.create_email_verification(email, purpose, code, config.EMAIL_CODE_TTL_SECONDS)
+    logger.info("验证码已生成", extra={
+        "event": "email_code.requested", "request_id": request_id,
+        "purpose": purpose,
+    })
+    # 与 Spec20 §2.1 同款：任务在 return **之前**登记（否则不会被登记），
+    # 在响应发出**之后**才跑——用户不等那一次 SMTP 往返（黑洞地址时是 10 秒）。
+    background_tasks.add_task(mailer.send_email_code, email, code, purpose)
+    return _ok({"sent": True})
+
+
+@app.post("/api/auth/verify-email-code")
+async def verify_email_code(payload: schemas.EmailCodeVerifyRequest, request: Request,
+                            x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """只回答"这个码现在对不对"（Spec22 §6.3）。**公开**。
+
+    供「修改密码」展开密码栏之前用（§2.7）；登录与注册**不用**它——它们各自在
+    自己的提交里校验。
+    ⚠️ 这个接口**不消费验证码**：它只是一次问答，真正的授权发生在
+    `reset-password` 的那次**重新校验**上（前端状态不可信）。
+    """
+    request_id = _request_id(x_request_id)
+    ip = auth.client_ip(request)
+    email = _norm_email(payload.email)
+    purpose = (payload.purpose or "").strip()
+    code = (payload.code or "").strip()
+
+    _reject_if_rate_limited(ip, request_id, purpose)
+    if not _email_ok(email):
+        raise EmailCodeRequestError("邮箱格式不正确（需包含 @，且 @ 前后都有内容）")
+    if purpose not in verifications.PURPOSES:
+        raise EmailCodeRequestError("未知的验证场景")
+    if not _code_ok(code):
+        raise EmailCodeRequestError("请填写 4 位数字验证码")
+
+    _verify_code(request_id, ip, email, purpose, code)
+    auth.reset_login_failures(ip)
+    return _ok({"verified": True})
+
+
+@app.post("/api/auth/login-by-email")
+async def login_by_email(payload: schemas.EmailLoginRequest, request: Request,
+                         x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """邮箱验证码登录（Spec22 §6.4）。**公开**，响应与 `POST /api/auth/login` 完全同形。
+
+    ⚠️ **本路由在白名单里，中间件不为它判限额**，所以下面那次 40304 判定必须自己写。
+    这是本 Spec 最容易漏的一处安全缺口：漏了它，一个已经欠费被拦的用户只要改用
+    邮箱登录就能绕过去（§6.4）。判据与登录路由**逐字相同**（`used > quota_limit`，
+    Spec21 §5.7 的 `>`）——四处副本，一处都不能漏。
+
+    校验顺序与 §5.7 B 的流程图一致：限速 → 格式 → 邮箱在不在 → 码 → 限额 → 发 token。
+    """
+    request_id = _request_id(x_request_id)
+    ip = auth.client_ip(request)
+    email = _norm_email(payload.email)
+    code = (payload.code or "").strip()
+
+    _reject_if_rate_limited(ip, request_id, "login")
+    if not _email_ok(email):
+        raise EmailCodeRequestError("邮箱格式不正确（需包含 @，且 @ 前后都有内容）")
+    if not _code_ok(code):
+        raise EmailCodeRequestError("请填写 4 位数字验证码")
+
+    # 「还未注册」这句在**这里**也要给一次：这条路不先发码也能到达（§6.4）。
+    # 管理员手工建的号没有邮箱，所以它永远走不到这里——那条路本来就不该有人走。
+    user = db.get_user_by_email(email)
+    if user is None:
+        logger.info("邮箱登录被拒：该邮箱未注册", extra={
+            "event": "email_code.rejected", "request_id": request_id,
+            "purpose": "login", "reason": "unregistered",
+        })
+        raise EmailCodeRejectedError(config.EMAIL_CODE_UNREGISTERED_NOTICE)
+
+    _verify_code(request_id, ip, email, "login", code)
+
+    # 限额判定（照登录路由：管理员永远走不到这个分支）。放在码校验**之后**——
+    # 否则任何人都能拿邮箱探测账号状态；放在 reset_login_failures **之前**——
+    # 被拒绝的请求不产生任何"部分成功"的副作用。
+    if not user["is_admin"] and user["used"] > user["quota_limit"]:
+        logger.warning("服务次数已达上限，拒绝邮箱登录", extra={
+            "event": "auth.quota_blocked", "request_id": request_id,
+            "username": user["username"], "used": user["used"],
+            "quota_limit": user["quota_limit"],
+        })
+        raise QuotaExceededError()
+
+    auth.reset_login_failures(ip)
+    token = auth.create_token(user["id"], user["username"])
+    logger.info("邮箱登录成功", extra={
+        "event": "auth.email_login", "request_id": request_id,
+        "username": user["username"],       # **不带 email**（PII，§10.2）
+    })
+    return _ok({"token": token, "username": user["username"], "is_admin": user["is_admin"]})
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(payload: schemas.ResetPasswordRequest, request: Request,
+                         x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """用邮箱验证码自助改密码（Spec22 §6.5）。**公开**：忘了密码的人没有 token。
+
+    **不需要旧密码**——用户已经用邮箱证明了自己（§2.7）。
+    **不吊销任何 token**：本仓从 Spec2 起就没有 token 黑名单（JWT 无状态、7 天有效），
+    所以"改了密码别人就进不来了"是**错的**，这是真实的边界（§3.3-4）。
+
+    码在这里**再校验一次**：前端"展开密码栏"只是 UI，服务端唯一能信的是提交那一刻
+    （§2.7）。返回 username 供前端预填登录框。
+    """
+    request_id = _request_id(x_request_id)
+    ip = auth.client_ip(request)
+    email = _norm_email(payload.email)
+    code = (payload.code or "").strip()
+    password = payload.password or ""
+
+    _reject_if_rate_limited(ip, request_id, "reset")
+    if not _email_ok(email):
+        raise EmailCodeRequestError("邮箱格式不正确（需包含 @，且 @ 前后都有内容）")
+    if not _code_ok(code):
+        raise EmailCodeRequestError("请填写 4 位数字验证码")
+    if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
+        # 40018 是 RegisterRequestError 的码，这里**复用**它——§6.5 与 §9 的表格
+        # 都点名了 40018（与 42901 被复用到"验证码猜错"上是同一种复用）。
+        raise RegisterRequestError(
+            f"密码需为 {auth.MIN_PASSWORD_LEN}~{auth.MAX_PASSWORD_LEN} 位"
+        )
+
+    user = db.get_user_by_email(email)
+    if user is None:
+        raise EmailCodeRejectedError(config.EMAIL_CODE_UNREGISTERED_NOTICE)
+
+    _verify_code(request_id, ip, email, "reset", code)
+
+    db.update_password(user["id"], auth.hash_password(password))
+    auth.reset_login_failures(ip)
+    logger.info("自助修改密码成功", extra={
+        "event": "auth.password_reset", "request_id": request_id,
+        "username": user["username"],       # **不带 email**（PII，§10.2）
+    })
+    return _ok({"username": user["username"]})
+
+
+@app.post("/api/click")
+async def record_click(payload: schemas.ClickEventRequest, request: Request,
+                       x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """入口点击埋点（Spec22 §6.6）。**公开**——「打开登录页」发生时用户还没有 token。
+
+    幂等：同 IP 同事件重复上报返回同样的 200，库里不新增行（`UNIQUE(event, ip)`
+    + `INSERT OR IGNORE`），前端不需要区分。响应**不回传计数**——前端不需要，
+    也没有"实时计数"这个需求。
+
+    IP **只落库、只参与 COUNT**：响应里只有 `{"ok": true}`，日志里也没有 IP
+    （Spec19 §10 的规矩）。面板展示的是"数量"，不是"名单"（§3.3-5）。
+    """
+    request_id = _request_id(x_request_id)
+    event = (payload.event or "").strip()
+    if event not in db._CLICK_EVENTS:
+        # **不静默忽略**：只有我们自己的前端会调它，收到未知事件名说明代码写错了，
+        # 静默会让这个错误永远不被发现（§2.9）。
+        raise ClickEventError()
+
+    if db.record_click(event, auth.client_ip(request)):
+        # 只在**新增了一个不重复 IP** 时打一行：重复点击不打，所以日志本身
+        # 就等于一份增量报表（每个 IP 每个事件最多一行，量不可能爆）。
+        logger.info("记录一个入口点击", extra={
+            "event": "click.recorded", "request_id": request_id,
+            "click_event": event,       # **不叫 event**：那是每行日志的事件名（§5.3）
+        })
+    return _ok({"ok": True})
 
 
 # ---------- 余额与充值（Spec21 §6.1 ~ §6.3）----------
@@ -1270,11 +1628,11 @@ async def overdue_recharge_request(payload: schemas.RechargeOverdueCreate, reque
         "username": user["username"], "recharge_id": record["id"],
         "recharge_source": "overdue",
     })
-    # 联系方式邮箱优先，没有才用手机号（§2.7）。`or "未填写"` 是纯防御：
-    # 管理员手工建的号两个都没有（§2.1），这是**允许的形态**，不是 bug。
+    # 联系方式恒为邮箱（Spec22 §5.1：电话三列已删，没有可回落的东西了）。
+    # `or "未填写"` 是纯防御：管理员手工建的号没有邮箱（§2.1），那是**允许的形态**。
     background_tasks.add_task(
         mailer.send_recharge_notification,
-        user["username"], user["email"] or user["phone"] or "未填写",
+        user["username"], user["email"] or "未填写",
         wechat, record["created_at"], True,
     )
     return _ok({"id": record["id"]})
@@ -1347,7 +1705,7 @@ async def submit_recharge(payload: schemas.RechargeRequestCreate, request: Reque
         })
         return _ok({"id": existing["id"]})
 
-    # 回读库拿 phone / email：登录态里只有 id/username/is_admin（§2.7）
+    # 回读库拿 email：登录态里只有 id/username/is_admin（§2.7）
     user = db.get_user_by_id(user_id)
     record = db.create_recharge_request(user_id, user["username"], wechat, "user")
     logger.info("收到充值申请", extra={
@@ -1355,9 +1713,10 @@ async def submit_recharge(payload: schemas.RechargeRequestCreate, request: Reque
         "username": user["username"], "recharge_id": record["id"],
         "recharge_source": "user",
     })
+    # 联系方式恒为邮箱（Spec22 §5.1）——见上面 overdue 那条的同款注释。
     background_tasks.add_task(
         mailer.send_recharge_notification,
-        user["username"], user["email"] or user["phone"] or "未填写",
+        user["username"], user["email"] or "未填写",
         wechat, record["created_at"], False,
     )
     return _ok({"id": record["id"]})
@@ -1372,8 +1731,11 @@ async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Re
     password = payload.password or ""
     if len(username) < 2:
         raise CredentialsFormatError("用户名至少 2 个字符")
-    if len(password) < 6:
-        raise CredentialsFormatError("密码至少 6 位")
+    # Spec22 §2.10：下限从写死的 6 降成 auth.MIN_PASSWORD_LEN。设定密码的路一共
+    # 三条（注册 / 建号 / 重置），**同一份规则**——别在这里再写一个 6。
+    if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
+        raise CredentialsFormatError(
+            f"密码至少 {auth.MIN_PASSWORD_LEN} 位")
     user = db.create_user(username, auth.hash_password(password), is_admin=False)
     logger.info("创建账号", extra={
         "event": "auth.admin.create_user", "request_id": request_id,
@@ -1384,7 +1746,10 @@ async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Re
 
 @app.get("/api/admin/users")
 async def admin_list_users(request: Request):
-    """用户列表（Spec18 §6.1）：每项带 quota_limit / used / phone / email，**不含** password_hash。
+    """用户列表（Spec18 §6.1）：每项带 quota_limit / used / email，**不含** password_hash。
+
+    Spec22 §5.1：`phone` 键随列一起消失。`email` 是**唯一**的联系方式，也是本接口
+    唯一带出的 PII（仅管理员可见，`_row_to_dict` 的 docstring 记了这条约定）。
 
     不返回"是否超额"这个派生布尔——前端用 `!u.is_admin && u.used > u.quota_limit`
     现算，超额的判据只有一处，复制到接口层就多了一个会漂移的副本。
@@ -1435,8 +1800,10 @@ async def admin_reset_password(user_id: int, payload: schemas.AdminResetPassword
     request_id = _request_id(x_request_id)
     operator = request.state.user
     password = payload.password or ""
-    if len(password) < 6:
-        raise CredentialsFormatError("密码至少 6 位")
+    # Spec22 §2.10：与建号那处同一套常量（三处副本一次收口）。
+    if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
+        raise CredentialsFormatError(
+            f"密码至少 {auth.MIN_PASSWORD_LEN} 位")
     if db.get_user_by_id(user_id) is None:
         raise UserNotFoundError("用户不存在")
     db.update_password(user_id, auth.hash_password(password))
@@ -1495,9 +1862,12 @@ async def admin_delete_user(user_id: int, request: Request,
 async def admin_list_register_requests(request: Request):
     """注册申请台账（Spec19 §6.4）：pending 优先，组内 id 倒序（最新在前）。
 
-    **不含** password_hash（_register_row_to_dict 的默认行为，结构性保证），
-    **不含** ip（它只服务于冷却期判定，对"批准谁"这个决策没有帮助）。
-    无分页、无筛选：量级由 IP 冷却天然限制（每台设备每天最多 1 条）。
+    **不含** password_hash（_register_row_to_dict 的默认行为，结构性保证）。
+
+    Spec22 §5.1：原来那句「**不含** ip（它只服务于冷却期判定）」连同「量级由 IP 冷却
+    天然限制」一起作废了——`ip` 列已从表里删掉，防刷改成"同一邮箱不得重复提交"
+    （`find_pending_register_by_email`），量级不再有天然上限。这里保留一句说明，
+    免得后来人照着旧注释去找一条不存在的列。
 
     Spec21 §7.2：额外带 `created_at_beijing`（同一页两种时区比不改更糟）。
     """
@@ -1510,12 +1880,19 @@ async def admin_list_register_requests(request: Request):
 @app.post("/api/admin/register-requests/{request_id}/approve")
 async def admin_approve_register(request_id: int, payload: schemas.RegisterApproveRequest,
                                  request: Request,
+                                 background_tasks: BackgroundTasks,
                                  x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
     """同意注册申请（Spec19 §6.5）：**同一事务**内建号 + 改状态 + 置空哈希。
 
     限额必须由管理员当次给定（0 ~ QUOTA_LIMIT_MAX）：弹窗里写着「1 元约 10 次」，
     管理员按实收金额填才算把"预付"落到了账上。留空 = 用默认值会引出隐藏分支，
     所以前端也不给默认值（§2.4）。
+
+    Spec22 §2.12：按下去之后**多一封信**——发给**注册者本人**的「注册成功」。
+    请求体 / 响应体 / 状态码 / 错误码 / 事务语义 / 日志事件**全部不变**，变的只是
+    "多了一封信"。⚠️ `background_tasks` 必须插在 `request: Request` 之后、
+    `x_request_id` 之前：它没有默认值，Python 不允许它排在带默认值的参数后面
+    （否则 SyntaxError，服务起不来 —— Spec20 §6.1 踩过一次）。
     """
     rid = _request_id(x_request_id)
     operator = request.state.user
@@ -1539,6 +1916,17 @@ async def admin_approve_register(request_id: int, payload: schemas.RegisterAppro
         "target_user": user["username"], "decision": "approved",
         "quota_limit": payload.quota_limit,
     })
+    # Spec22 §5.7 E：通知注册者本人。
+    # email 用**申请行**上那个（被验证码验证过的就是它）——`record` 就是上面那次
+    # with_secret=True 的预检结果，**不用再查一遍库**（approve_register_request 会把它
+    # 原样复制进新用户行，所以与 user["email"] 恒等）。
+    # 没有邮箱时（Spec22 之前的旧 pending 行）交给 mailer 判空跳过 + reason=no_email，
+    # **号照建**——邮件是通知，不是业务（Spec20 §5.3 的原则在这里仍然成立）。
+    background_tasks.add_task(
+        mailer.send_register_approved_notification,
+        record["username"], record["email"] or "", record["created_at"],
+        request_id,      # ⚠️ §5.6 的签名草图漏了它，但 §10 的字段表与 §13 用例 15
+    )                    #    都要求 register_id —— 以 §10/§13 为准（见 mailer 的 docstring）
     return _ok({"id": user["id"], "username": user["username"],
                 "is_admin": user["is_admin"], "quota_limit": user["quota_limit"]})
 
@@ -1611,6 +1999,7 @@ async def admin_list_recharge_requests(request: Request):
 @app.post("/api/admin/recharge-requests/{request_id}/approve")
 async def admin_approve_recharge(request_id: int, payload: schemas.RechargeApproveRequest,
                                  request: Request,
+                                 background_tasks: BackgroundTasks,
                                  x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
     """同意充值申请（Spec21 §6.5）：**同一事务**内置 approved + 记 amount + 加额度。
 
@@ -1622,6 +2011,11 @@ async def admin_approve_recharge(request_id: int, payload: schemas.RechargeAppro
     校验顺序见 §6.5（amount → 记录存在 → 仍 pending → 目标用户还在 → 上界 → 事务）。
     目标用户已被删除时**预检**：让 UPDATE users 影响 0 行然后静默提交，会留下
     "记录显示已批准、钱没到账"的挂账（§2.5）。
+
+    Spec22 §2.12：按下去之后**多一封信**——发给**该用户本人**的到账通知，
+    `source` 决定是哪一封（`user` → 「充值已到账」/ `overdue` → 「账号已恢复」）。
+    请求体 / 响应体 / 状态码 / 错误码 / 事务语义 / 日志事件**全部不变**。
+    ⚠️ `background_tasks` 的插入位置理由见 admin_approve_register 的 docstring。
     """
     rid = _request_id(x_request_id)
     operator = request.state.user
@@ -1647,6 +2041,16 @@ async def admin_approve_recharge(request_id: int, payload: schemas.RechargeAppro
         "target_user": user["username"], "decision": "approved",
         "amount": payload.amount,
     })
+    # Spec22 §5.7 D：通知用户本人。`target` 是上面那次 40402 预检取到的行，
+    # **不用再查一遍库**；overdue 直接由 record["source"] 推出（这正是那一列的意义，
+    # §2.12）——**不新增请求字段**。没有邮箱（管理员手工建的号）交给 mailer 判空跳过
+    # + reason=no_email，**额度照加**。
+    background_tasks.add_task(
+        mailer.send_recharge_approved_notification,
+        user["username"], target["email"] or "", record["created_at"],
+        record["source"] == "overdue",
+        request_id,      # 同上：§5.6 的草图漏了，§10/§13 用例 18 要它
+    )
     # 回带 used：前端不必再拉一次整表就能就地更新那一行（与 admin_set_quota 同款）
     return _ok({"id": user["id"], "username": user["username"],
                 "quota_limit": user["quota_limit"], "used": user["used"]})
@@ -1697,15 +2101,36 @@ async def admin_delete_recharge(request_id: int, request: Request,
     return _ok({"id": request_id})
 
 
+@app.post("/api/admin/clicks/clear")
+async def admin_clear_clicks(request: Request,
+                             x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id")):
+    """清空入口点击统计（Spec22 §6.7，仅管理员——中间件保证）。
+
+    与 Spec18 的「清空调用统计」同款：**只重置统计区间**，不动任何计费口径
+    （点击本来就不计费）。`db.clear_clicks()` 在一个事务里删行 + 写
+    `app_meta.clicks_cleared_at`——清零与"上次清零时间"必须同生同死。
+    """
+    request_id = _request_id(x_request_id)
+    cleared = db.clear_clicks()
+    logger.info("清空入口点击统计", extra={
+        "event": "click.cleared", "request_id": request_id,
+        "operator": request.state.user["username"], "affected": cleared,
+    })
+    return _ok({"cleared": cleared})
+
+
 @app.get("/api/admin/stats")
 async def admin_stats(request: Request):
-    """4 类调用聚合统计 + AI 服务反馈汇总 + 两个清零时间（只读；/api/admin/* 限管理员）。
+    """4 类调用聚合统计 + AI 服务反馈汇总 + 入口点击 + 三个清零时间（只读；限管理员）。
 
     Spec11：额外返回 usage_cleared_at / feedback_cleared_at（null | UTC ISO），
     供前端展示各统计块"上次清零"的时间起点。
+    Spec22 §6.8：再多一个 clicks_cleared_at（`get_cleared_times()` 已经带上它，
+    下面那句 `stats.update(...)` **一个字都不用改**）与一组 clicks。
     """
     stats = db.get_usage_stats()
     stats["feedback_totals"] = db.get_feedback_totals()
+    stats["clicks"] = db.get_click_stats()
     stats.update(db.get_cleared_times())
     return _ok(stats)
 

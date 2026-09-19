@@ -29,7 +29,9 @@ class JsonFormatter(logging.Formatter):
                # Spec19 §10 表里写的 request_id：后者在本仓已经是"HTTP X-Request-Id"
                # 的固定含义（每个路由的每行日志都带它），两者同名会让排查时
                # 拿 request_id 一搜就串味。注册申请 id 一律叫 register_id。
-               "register_id", "has_phone", "has_email",
+               # Spec22 删除："has_phone" —— 注册表单已经没有任何电话字段了，
+               #   留着它就是一个永远不会被传进来的白名单项。
+               "register_id", "has_email",
                "decision", "was_status",
                # Spec20 注册申请邮件通知事件字段（notify.register_mail_*）。
                # 注意 "error" 不是新概念：main.py / task_queue.py 里早有同名的
@@ -41,7 +43,16 @@ class JsonFormatter(logging.Formatter):
                # Spec12 wiki 事件的"作品来源"（generate|edit|upload），
                # 两者同名会让 `grep '"source"'` 一次捞到两种含义的东西。
                # 这与 Spec19 用 register_id 而不是 request_id 是同一条理由。
-               "recharge_id", "recharge_source", "amount")
+               "recharge_id", "recharge_source", "amount",
+               # Spec22 邮箱验证码与入口统计事件字段。
+               # purpose：register | login | reset（email_code.* 事件用）。
+               # click_event：**不叫 event** —— event 在本仓是每条日志的"事件名"
+               #   （_FIELDS 的第一项，Spec §10 起）。同名会让 `grep '"event"'`
+               #   一次捞到两种东西，与 Spec19 的 register_id、Spec21 的
+               #   recharge_source 是同一条理由（Spec22 §5.3）。
+               # 注意：这是本白名单**第三次**被漏改的地方（Spec20 一次、
+               #   Spec21 一次）——没登记的 extra 键会被静默丢弃，不报错、不警告。
+               "purpose", "click_event")
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(

@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
-import { clearToken, getToken, login as apiLogin, me as apiMe } from '../api/chatApi'
+import {
+  clearToken, getToken, login as apiLogin, loginByEmailApi, me as apiMe
+} from '../api/chatApi'
 import { setQuotaNotice } from '../utils/quotaNotice'
 
 // 登录态存 localStorage；登出 = 清 token（Spec2 §3 范围内）
@@ -37,6 +39,20 @@ export const useAuthStore = defineStore('auth', {
 
     async login(username, password) {
       const res = await apiLogin(username, password)
+      this.token = res.token
+      this.username = res.username
+      this.isAdmin = res.is_admin
+      localStorage.setItem(TOKEN_KEY, res.token)
+    },
+
+    // Spec22 §6.4：邮箱验证码登录。收尾与 login() 完全一致——token / username /
+    // is_admin 三个一落，App.vue 的 v-if 自动切到聊天视图，调用方不用做任何事。
+    //
+    // **40304（欠费）不在这里处理**：与 login() 的处境一模一样，store 只负责
+    // "登录成功之后怎么收尾"，被拒时的欠费面板由调用方（Login.vue，Spec21 §7.4
+    // 的那一行 `overdraft.value = {...}`）挂——这里**不另写一套**。
+    async loginByEmail(email, code) {
+      const res = await loginByEmailApi(email, code)
       this.token = res.token
       this.username = res.username
       this.isAdmin = res.is_admin

@@ -65,7 +65,11 @@ class NotFoundError(AppError):
 
 # ---- 认证 / 授权（Spec2 §9，追加到 Spec §9）----
 class CredentialsFormatError(AppError):
-    """用户名或密码格式非法（用户名 <2 字符 / 密码 <6 位）。"""
+    """用户名或密码格式非法（用户名 <2 字符 / 密码 <auth.MIN_PASSWORD_LEN 位）。
+
+    Spec22 §2.10：密码下限从 6 降到 2，所以"<6 位"这个说法不再成立——
+    下限由 `auth.MIN_PASSWORD_LEN` 定义，本类只负责抛，不定义规则。
+    """
 
     def __init__(self, message="用户名或密码格式非法"):
         super().__init__(40010, message, status_code=400)
@@ -112,7 +116,13 @@ class DuplicateUsernameError(AppError):
 
 
 class LoginRateLimitedError(AppError):
-    """登录失败过于频繁（限速）。"""
+    """登录失败过于频繁（限速）。
+
+    Spec22 §2.6：同一个限速器（`auth.is_login_blocked` / `record_login_failure`）
+    现在也管**验证码猜错**——`verify-email-code` / `login-by-email` /
+    `reset-password` / 注册提交的验证码校验四处失败都计入。同一个 IP 猜密码和
+    猜验证码是一回事，用同一个码让前端与限速口径只有一份。
+    """
 
     def __init__(self, message="登录尝试过于频繁，请稍后再试"):
         super().__init__(42901, message, status_code=429)
@@ -279,16 +289,10 @@ class PaymentQrMissingError(NotFoundError):
         )
 
 
-class RegisterRateLimitedError(AppError):
-    """同一 IP 在冷却期内已提交过申请（Spec19 §2.2）。"""
-
-    def __init__(self, message: str | None = None):
-        super().__init__(
-            40902,
-            message or (f"每台设备每天只能提交一次注册申请，"
-                        f"请明天再试或联系客服 {config.SUPPORT_EMAIL}"),
-            status_code=409,
-        )
+# Spec22 删除：class RegisterRateLimitedError(AppError)  # 40902
+#   它的唯一语义是"同一 IP 24 小时内已提交过注册申请"（Spec19 §2.2）。
+#   需求 3 删掉了那个限制 → 这个码没有生产者了 → 整个类删掉。
+#   **不把它改嫁给"验证码重发冷却"**：重定义既有码会让旧日志里的 40902 变成假话（§2.11）。
 
 
 class RegisterAlreadyReviewedError(AppError):
@@ -336,6 +340,72 @@ class RechargeAlreadyReviewedError(AppError):
 
     def __init__(self, message: str = "该充值记录已处理"):
         super().__init__(40904, message, status_code=409)
+
+
+# ---- 邮箱验证码与入口统计（Spec22 §9，追加到 Spec21 §9 之后）----
+
+class EmailCodeRequestError(BadRequestError):
+    """验证码链路的字段/校验失败。
+
+    多个不同 message 共用一个码，与 Spec19 的 RegisterRequestError（40018）、
+    Spec21 的 RechargeRequestError（40019）同款：
+    邮箱格式不对 / 验证场景未知 / 验证码不是 4 位数字 / **验证码错误或已过期**。
+    """
+
+    def __init__(self, message: str = "验证码请求非法"):
+        super().__init__(message, code=40020)
+
+
+class ClickEventError(BadRequestError):
+    """埋点事件名不在白名单里（只有我们自己的前端会调它，出现即代码写错）。
+
+    **不静默忽略**：静默会让"前端写错了一个事件名"这件事永远不被发现（§2.9）。
+    """
+
+    def __init__(self, message: str = "未知的埋点事件"):
+        super().__init__(message, code=40021)
+
+
+class EmailCodeRateLimitedError(AppError):
+    """同一邮箱在同一场景下的重发冷却期内（默认 1 分钟）。
+
+    文案来自 config.EMAIL_CODE_COOLDOWN_MESSAGE（前端零副本）。
+
+    新开一个 40906 而不是复用 40902：那个码的语义是"同一 IP 24 小时一次"，
+    改嫁会让旧日志里的 40902 变成一句假话（§2.11）。
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(40906, message or config.EMAIL_CODE_COOLDOWN_MESSAGE,
+                         status_code=409)
+
+
+class EmailCodeRejectedError(AppError):
+    """查重拒绝：邮箱已注册 / 已有待审批申请 / 还未注册。
+
+    三句话共用一个码（用户看到的是 message，不需要知道是哪一种）。
+    第一句里要填用户名，所以 message 由**路由**拼好传进来（模板在 config，
+    理由见 §2.4：文案的唯一来源是 config，不是这条路由）。
+    """
+
+    def __init__(self, message: str = "该邮箱无法申请验证码"):
+        super().__init__(40907, message, status_code=409)
+
+
+class EmailServiceUnavailableError(AppError):
+    """未配置 SMTP_PASSWORD —— 验证码发不出去，三条链路都走不通（§2.5）。
+
+    这是**唯一可预知**的失败，所以从"静默降级"改成"明确报错"。Spec20/21 里
+    邮件只是通知（不发不影响业务），而验证码是业务的前置条件——静默降级在这里
+    的含义变成"接口 200、用户傻等"。
+    用 503 而不是 500：这是服务暂时不可用，不是代码错了。
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            50302, message or f"邮箱服务暂不可用，请联系客服 {config.SUPPORT_EMAIL}",
+            status_code=503,
+        )
 
 
 class InternalError(AppError):

@@ -24,23 +24,41 @@
           placeholder="密码"
           autocomplete="current-password"
         />
+        <!-- 提示行：红、绿各一条，互不覆盖 -->
         <p v-if="error" class="login-error">{{ error }}</p>
+        <p v-if="okText" class="login-ok">{{ okText }}</p>
         <button class="btn-login" type="submit" :disabled="loading">
           {{ loading ? '登录中…' : '登 录' }}
         </button>
       </form>
 
-      <!-- Spec19 §7.2：注册入口（REGISTER_ENABLED=false 时整体不渲染按钮，客服行保留） -->
-      <div v-if="regCfg" class="login-register">
-        <button v-if="regCfg.enabled" type="button" class="btn-register" @click="showRegister = true">
+      <!-- Spec19 §7.2 的语义必须保留：REGISTER_ENABLED=false 时注册按钮不渲染，客服行保留。
+           Spec22 把 v-if 从"外层 div"下移到了**单个元素**上 —— 因为下面两个新按钮
+           不依赖 regCfg（它们用的是邮箱验证码，与 REGISTER_ENABLED 无关）。 -->
+      <div class="login-register">
+        <button v-if="regCfg?.enabled" type="button" class="btn-register" @click="openRegister">
           新用户注册
         </button>
-        <p class="login-service">有问题请致信官方客服：{{ regCfg.contact_email }}</p>
+
+        <!-- Spec22 §7.2：两个新入口。它们与 regCfg 无关，**失败也要在**（regCfg 取不到时
+             仍然要能登录/改密码——它们是老用户的逃生通道）。 -->
+        <div class="login-alt">
+          <button type="button" class="btn-link" @click="emailAuth = 'login'">邮箱登录</button>
+          <button type="button" class="btn-link" @click="emailAuth = 'reset'">修改密码</button>
+        </div>
+
+        <p v-if="regCfg" class="login-service">有问题请致信官方客服：{{ regCfg.contact_email }}</p>
       </div>
     </div>
 
     <!-- Spec19 §7.3：注册申请弹窗 -->
     <RegisterModal v-if="showRegister" :config="regCfg" @close="showRegister = false" />
+
+    <!-- Spec22 §7.3：邮箱登录 / 修改密码（一个组件两种模式，照 RechargeModal 的先例） -->
+    <EmailAuthModal v-if="emailAuth" :mode="emailAuth"
+                    @close="emailAuth = null"
+                    @done="onEmailAuthDone"
+                    @overdraft="onEmailAuthOverdraft" />
 
     <!-- Spec21 §7.4：被强制退出 / 登录被拒时，二维码直接弹在登录页上。
          这是提示语「若您单击登录键则会跳出充值面板」承诺的那块面板，红色提示行
@@ -58,15 +76,19 @@
 import { onMounted, ref } from 'vue'
 import RegisterModal from './RegisterModal.vue'
 import RechargeModal from './RechargeModal.vue'
+import EmailAuthModal from './EmailAuthModal.vue'
 import { getRegisterConfig } from '../api/chatApi'
 import logoUrl from '../assets/logo.svg'
 import { useAuthStore } from '../store/auth'
 import { takeQuotaNotice } from '../utils/quotaNotice'
+import { trackClick } from '../utils/track'
 
 const auth = useAuthStore()
 const username = ref('')
 const password = ref('')
 const error = ref('')
+// Spec22 §7.2：绿色成功提示行（改密码成功后回到这里说一句）
+const okText = ref('')
 const loading = ref(false)
 
 // Spec19 §7.2：注册弹窗的公开配置（取不到时为 null → 不画注册入口）
@@ -74,8 +96,14 @@ const regCfg = ref(null)
 const showRegister = ref(false)
 // Spec21 §7.4：欠费充值面板。null = 不显示；有值 = 显示，并把其中的 username 预填进账号框
 const overdraft = ref(null)
+// Spec22 §7.2：邮箱登录 / 修改密码弹窗的模式；null = 不显示
+const emailAuth = ref(null)
 
 onMounted(async () => {
+  // Spec22 §2.9 埋点：打开登录页 = 用户点名的"登录主页"。
+  // **不 await、不 try/catch** —— utils/track.js 内部已经把异常全吞了（§7.5）。
+  trackClick('login_page')
+
   // Spec18 §7.4：落地到登录页时，若有一条待显示的限额警告 → 红色提示行 + 充值面板。
   // **不用 window.alert**（用户后来改的口径）：alert 是阻断式的，点掉「确定」之前
   // 用户看不到背后的登录页与充值面板，而且同一句话要说两遍。现在只留红色提示行
@@ -104,12 +132,38 @@ onMounted(async () => {
   }
 })
 
+function openRegister() {
+  trackClick('register') // Spec22 §2.9 埋点：点「新用户注册」
+  showRegister.value = true
+}
+
+// Spec22 §7.2：两个邮箱弹窗收工后的收尾。
+function onEmailAuthDone(payload) {
+  const mode = emailAuth.value
+  emailAuth.value = null
+  if (mode === 'reset') {
+    // 改密码成功 → 回登录页 + 说一句（什么都不说地回来，用户分不清"成功了"和"没点对"）
+    username.value = payload.username || ''
+    error.value = ''
+    okText.value = '密码已修改，请用新密码登录'
+  }
+  // mode === 'login'：token 已进 store，App.vue 的 v-if 会自动切到聊天视图，这里不用做事
+}
+
+// Spec22 §7.6：邮箱登录被 40304（欠费）拦下 → **复用** Spec21 §7.4 那块欠费充值面板。
+// 这一行与 submit() 的 catch 里那行是同一处置，不是第二套逻辑。
+function onEmailAuthOverdraft(payload) {
+  emailAuth.value = null
+  overdraft.value = payload
+}
+
 async function submit() {
   if (!username.value.trim() || !password.value) {
     error.value = '请输入用户名和密码'
     return
   }
   error.value = ''
+  okText.value = '' // 上一次改密码成功的绿字不该压在这次登录上
   loading.value = true
   try {
     await auth.login(username.value.trim(), password.value)

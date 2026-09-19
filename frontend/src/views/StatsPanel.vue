@@ -71,12 +71,41 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Spec22 §7.8：入口点击（不重复 IP）。结构照抄上面的反馈区块——
+         连类名也照抄（.feedback-head / .head-titles / .cleared-hint / .user-table），
+         这样样式是白拿的；§7.8 示意图里的 .stats-block 之类是泛指，本文件里并不存在。 -->
+    <div class="admin-table-wrap clicks-wrap">
+      <div class="feedback-head">
+        <div class="head-titles">
+          <h3>入口点击（不重复 IP）</h3>
+          <span class="cleared-hint">上次清零：{{ clicksClearedText }}</span>
+        </div>
+        <button class="btn-mini" :disabled="clearingClicks" @click="clearClicks">
+          清空入口统计
+        </button>
+      </div>
+      <table class="user-table">
+        <thead>
+          <tr>
+            <th>入口</th>
+            <th>不重复 IP 数</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in clickRows" :key="row.key">
+            <td>{{ row.label }}</td>
+            <td>{{ row.count }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { clearFeedback, clearUsage, getUsageStats } from '../api/chatApi'
+import { clearClicksApi, clearFeedback, clearUsage, getUsageStats } from '../api/chatApi'
 import { useAuthStore } from '../store/auth'
 
 const emit = defineEmits(['close'])
@@ -90,11 +119,14 @@ const stats = ref({
   shares: {},
   feedback_totals: {},
   usage_cleared_at: null,    // Spec11：两个清零时间（null = 从未清零）
-  feedback_cleared_at: null
+  feedback_cleared_at: null,
+  clicks: {},                // Spec22 §7.8：五个入口的不重复 IP 数
+  clicks_cleared_at: null    // Spec22：第三个清零时间
 })
 const error = ref('')
-const clearing = ref(false)      // 反馈清空进行中
-const clearingUsage = ref(false) // 调用统计清零进行中
+const clearing = ref(false)       // 反馈清空进行中
+const clearingUsage = ref(false)  // 调用统计清零进行中
+const clearingClicks = ref(false) // Spec22：入口统计清零进行中
 
 // Spec9：三类服务反馈展示顺序
 const FEEDBACK_ROWS = [
@@ -111,6 +143,21 @@ function fmtCleared(iso) {
 }
 const usageClearedText = computed(() => fmtCleared(stats.value.usage_cleared_at))
 const feedbackClearedText = computed(() => fmtCleared(stats.value.feedback_cleared_at))
+// Spec22 §7.8：复用同一个 fmtCleared（浏览器本地时区，与上面两个"上次清零"同一口径）
+const clicksClearedText = computed(() => fmtCleared(stats.value.clicks_cleared_at))
+
+// Spec22 §7.8：5 个入口与后端 db._CLICK_EVENTS 一一对应。
+// **不显示"合计"** —— 5 个 IP 集合互相重叠，加起来没有含义（§2.9）。
+const CLICK_ROWS = [
+  { key: 'login_page', label: '打开登录页' },
+  { key: 'register', label: '点「新用户注册」' },
+  { key: 'community', label: '社区' },
+  { key: 'gallery', label: '我的作品' },
+  { key: 'recharge', label: '余额与充值' }
+]
+const clickRows = computed(() =>
+  CLICK_ROWS.map((r) => ({ ...r, count: stats.value.clicks?.[r.key] ?? 0 }))
+)
 
 // 5 类展示顺序（Spec4 §7；Spec18 §7.6a 追加风格归纳）
 const CATEGORIES = [
@@ -176,11 +223,36 @@ async function clearUsageStats() {
   }
 }
 
+// Spec22 §7.8：清空入口统计（照 clearUsageStats 写，confirm 一次防误触）。
+// 文案说清它与「清空调用统计」是两件事——两个清零互不干扰（§2.9）。
+async function clearClicks() {
+  if (!window.confirm(
+    '确定清空全部入口点击统计？5 个入口的不重复 IP 数将归 0。\n' +
+    '注意：这只清空入口点击，【不影响】调用统计与 AI 服务反馈。\n' +
+    '此操作不可撤销。'
+  )) return
+  clearingClicks.value = true
+  error.value = ''
+  try {
+    await clearClicksApi()
+    await load()
+  } catch (e) {
+    error.value = e.message || '清空失败'
+  } finally {
+    clearingClicks.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
 <style scoped>
 .feedback-wrap {
+  margin-top: 20px;
+}
+
+/* Spec22 §7.8：第三个区块，与反馈区块同款间距 */
+.clicks-wrap {
   margin-top: 20px;
 }
 

@@ -153,7 +153,8 @@ export async function me() {
 export async function listUsers() {
   const { data } = await http.get('/api/admin/users')
   // [{ id, username, is_admin, created_at, created_at_beijing, quota_limit, used,
-  //    phone, email }]（Spec18 §6.1 + Spec21 §7.2，无 password_hash）
+  //    email }]（Spec18 §6.1 + Spec21 §7.2；Spec22 §5.5 起 phone 已从库里删掉，
+  //    无 password_hash）
   return data.data
 }
 
@@ -197,17 +198,21 @@ export async function getRegisterConfig() {
   return data.data
 }
 
-export async function submitRegisterRequest({ username, password, phone, email, wechat }) {
+// Spec19 §7.6 的签名（Spec22 §6.1 改造）
+// 原：submitRegisterRequest({ username, password, phone, email, wechat })
+// 新：phone 删除，新增 code（**没有 confirm** —— 它不提交，§2.10）
+export async function submitRegisterRequest({ username, password, email, code, wechat }) {
   const { data } = await http.post('/api/auth/register', {
-    username, password, phone, email, wechat
+    username, password, email, code, wechat
   })
   return data.data // { id }
 }
 
 export async function listRegisterRequests() {
   const { data } = await http.get('/api/admin/register-requests')
-  // [{ id, username, phone, email, wechat, status, created_at, reviewed_at }]
-  // pending 优先、组内 id 倒序；**无** password_hash / ip（Spec19 §6.4）
+  // [{ id, username, email, wechat, status, created_at, reviewed_at }]
+  // pending 优先、组内 id 倒序；**无** password_hash / ip（Spec19 §6.4）；
+  // Spec22 §5.5 起 phone 已从库里删掉。
   return data.data
 }
 
@@ -226,6 +231,40 @@ export async function rejectRegisterRequest(id) {
 export async function deleteRegisterRequest(id) {
   const { data } = await http.delete(`/api/admin/register-requests/${id}`)
   return data.data // { id }
+}
+
+// ---- 邮箱验证码（Spec22 §6.2~§6.5）----
+// 拦截器不用改（§7.9）：这批路由的失败码是 40020 / 40906 / 40907 / 50302，
+// 既不是 401 也不是 40304，不会误触发登出或"超额"分支。唯一的例外是
+// /api/auth/login-by-email —— 它会主动返回 40304（限额在中间件里被白名单跳过，
+// 所以路由自己判），而那条**正是**要复用 Spec21 §7.4 欠费面板的路径。
+
+// purpose: 'register' | 'login' | 'reset'
+export async function getEmailCode(email, purpose) {
+  const { data } = await http.post('/api/auth/email-code', { email, purpose })
+  return data.data // { sent: true }
+}
+
+export async function verifyEmailCode(email, purpose, code) {
+  const { data } = await http.post('/api/auth/verify-email-code', { email, purpose, code })
+  return data.data // { verified: true }
+}
+
+// 与 login() 同形：{ token, username, is_admin }
+export async function loginByEmailApi(email, code) {
+  const { data } = await http.post('/api/auth/login-by-email', { email, code })
+  return data.data
+}
+
+// 不需要旧密码（邮箱已证明身份，§2.7）；也没有 confirm（§2.10）
+export async function resetPassword(email, code, password) {
+  const { data } = await http.post('/api/auth/reset-password', { email, code, password })
+  return data.data // { username }
+}
+
+export async function clearClicksApi() {
+  const { data } = await http.post('/api/admin/clicks/clear')
+  return data.data // { cleared }
 }
 
 // ---- 余额与充值（Spec21 §6）----

@@ -163,16 +163,19 @@ class CommentCreateRequest(BaseModel):
 # ---- 注册申请与审批（Spec19 §6.2 / §6.5）----
 
 class RegisterRequestCreate(BaseModel):
-    """POST /api/auth/register 请求体（Spec19 §6.2）。
+    """POST /api/auth/register 请求体（Spec22 §6.1，Spec19 §6.2 的改造版）。
 
     全部字段都是裸 str：格式规则（长度、纯数字、@ 位置）一律在路由层判，
     好让每一条都有自己的中文 message。Pydantic 只负责"字段在不在"。
+
+    ⚠️ **没有 `phone` 了**。删字段**不是**改成 Optional：留着一个可选字段，
+    就留了一条能被写进已删列的路（§5.1）。
     """
 
     username: str
     password: str
-    phone: Optional[str] = None
-    email: Optional[str] = None
+    email: str          # Spec22：必填（原 phone / email 二选一已成历史）
+    code: str           # Spec22：邮箱验证码（4 位数字，格式在路由层判）
     wechat: str
 
 
@@ -206,3 +209,48 @@ class RechargeApproveRequest(BaseModel):
     非整数由 Pydantic 拦下 → 40001；取值范围（≥1 且不超 QUOTA_LIMIT_MAX）在路由层判。"""
 
     amount: int
+
+
+# ---- 邮箱验证码与入口统计（Spec22 §6.1~§6.6）----
+
+class EmailCodeRequest(BaseModel):
+    """POST /api/auth/email-code 请求体（Spec22 §6.2）。
+    purpose 的白名单在路由层判（40020「未知的验证场景」）。"""
+
+    email: str
+    purpose: str        # register | login | reset
+
+
+class EmailCodeVerifyRequest(BaseModel):
+    """POST /api/auth/verify-email-code 请求体（Spec22 §6.3）。
+    供「修改密码」展开密码栏之前使用；登录与注册不用它。"""
+
+    email: str
+    purpose: str
+    code: str
+
+
+class EmailLoginRequest(BaseModel):
+    """POST /api/auth/login-by-email 请求体（Spec22 §6.4）。
+    响应与 POST /api/auth/login **完全同形**，前端直接复用收尾逻辑。"""
+
+    email: str
+    code: str
+
+
+class ResetPasswordRequest(BaseModel):
+    """POST /api/auth/reset-password 请求体（Spec22 §6.5）。
+
+    只有一个 password —— **没有** confirm 字段：两次输入是否一致是前端的事，
+    后端根本收不到第二个框（§2.10）。不需要旧密码（邮箱已证明身份，§2.7）。
+    """
+
+    email: str
+    code: str
+    password: str
+
+
+class ClickEventRequest(BaseModel):
+    """POST /api/click 请求体（Spec22 §6.6）。白名单在路由层判（40021）。"""
+
+    event: str

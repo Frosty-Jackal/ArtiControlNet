@@ -90,17 +90,48 @@ REGISTER_ENABLED = os.getenv("REGISTER_ENABLED", "true").strip().lower() not in 
     "0", "false", "no", "off", "",
 )
 
-# 同一 IP 的申请冷却期（秒）。默认 86400 = 24 小时（Spec19 §2.2 的滚动窗口）。
-REGISTER_IP_WINDOW_SECONDS = int(os.getenv("REGISTER_IP_WINDOW_SECONDS", "86400"))
+# Spec22 删除：REGISTER_IP_WINDOW_SECONDS
+#   唯一消费者是"同一 IP 24 小时一次"的注册冷却，需求 3 已把它整个删掉（§2.11）。
+#   留一个"设了也不生效"的变量，正是 CLAUDE.md 为 QUOTA_CONTACT_EMAIL 记过的那类静默失败。
 
 # 收款码文件（**不进仓库**，见 .gitignore；部署时手动放到这个位置）。
 # 不是环境变量：它是一条路径，与 AUTH_DB_PATH 同类。
 PAYMENT_QR_PATH = BASE_DIR / "payment.jpg"
 
-# 两句给用户看的提示语（唯一来源，前端零副本——与 QUOTA_EXCEEDED_MESSAGE 同一原则）
+# 给用户看的提示语（唯一来源，前端零副本——与 QUOTA_EXCEEDED_MESSAGE 同一原则）
 REGISTER_PRICE_NOTICE = "请先预充值，0.9 元起充，参考价格：0.9 元约 10 次设计服务"
-REGISTER_DAILY_NOTICE = (
-    f"每人每天只能申请一个账号，若操作失误或其他需求请联系在线客服 {SUPPORT_EMAIL}"
+# Spec22 删除：REGISTER_DAILY_NOTICE
+#   原文「每人每天只能申请一个账号…」随同一条限制一起消失。
+#   连带 GET /api/auth/register-config 不再返回 daily_notice、RegisterModal 删掉那一行（§2.11）。
+
+# ===== 邮箱验证码（Spec22）=====
+# 本段与 SMTP 无关（只放两个数字与几句文案），所以不需要等 Spec20 的变量，
+# 放在 Spec19 注册块之后、Spec20 邮件块之前即可。
+
+# 验证码 TTL（秒）。默认 600 = 10 分钟。存进 email_verifications.created_at 的
+# cutoff 由它算出来，邮件正文里那句"验证码 N 分钟内有效"也由它推出来
+# （照 RECHARGE_COOLDOWN_MESSAGE 的先例：分钟数永远跟着秒数走，改一处就够）。
+EMAIL_CODE_TTL_SECONDS = int(os.getenv("EMAIL_CODE_TTL_SECONDS", "600"))
+
+# 同一邮箱、同一场景的重发冷却（秒）。默认 60 = 1 分钟。
+EMAIL_CODE_RESEND_SECONDS = int(os.getenv("EMAIL_CODE_RESEND_SECONDS", "60"))
+
+# 四句给用户看的提示语（**唯一来源，前端零副本** —— 与 QUOTA_EXCEEDED_MESSAGE /
+# REGISTER_PRICE_NOTICE / RECHARGE_COOLDOWN_MESSAGE 同一原则）。
+# 前两句是用户逐字给的原文（含「宝子」与那个弯引号）；第三句是本 Spec 拟的
+# （用户只给了"已注册"那句，但"已提交过申请"必须另有一句，理由见 §2.4）。
+# 第一句里的按钮名是「修改密码」——用户原话写的是"找回/修改密码"，而按钮已经
+# 改名（§0 第 6-a 条），指着一个不存在的按钮是错的。要改称呼只动这一行。
+EMAIL_CODE_REGISTERED_NOTICE = (
+    "已注册账号{username}，请前往登录界面。忘记密码请前往登录界面“修改密码”"
+)
+EMAIL_CODE_PENDING_NOTICE = "该邮箱已提交过注册申请，请等待管理员审批"
+EMAIL_CODE_UNREGISTERED_NOTICE = "还未注册，请宝子前往新用户注册~"
+
+# 重发冷却那句告警。**分钟数由秒数推出来**，不是另写一个 "1"
+# （CLAUDE.md 已为 RECHARGE_COOLDOWN_MESSAGE 记过同一条：改冷却期文案会自动跟着变）。
+EMAIL_CODE_COOLDOWN_MESSAGE = (
+    f"验证码发送过于频繁，请 {max(1, EMAIL_CODE_RESEND_SECONDS // 60)} 分钟后重试"
 )
 
 # ===== 注册申请邮件通知（Spec20）=====

@@ -30,8 +30,7 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     quota_limit   INTEGER NOT NULL DEFAULT {_QUOTA_DEFAULT},
-    phone         TEXT,          -- Spec21：手机号（可空——管理员手工建的号没有）
-    email         TEXT           -- Spec21：邮箱（同上）
+    email         TEXT           -- Spec21 补的列，Spec22 起是唯一联系方式（可空：管理员手工建的号没有）
 )
 """
 
@@ -233,27 +232,24 @@ CREATE TABLE IF NOT EXISTS wiki (
 # **不是用户表**：申请阶段不创建任何 users 行，同意时才在同一事务里建号（§1.3）。
 # 刻意**没有** UNIQUE(username)：同一用户名允许多条被拒绝的历史记录，
 # 唯一性由 users.username 的 UNIQUE 在同意那一刻兜底（§3.3-2）。
-# ip 列是防重复的唯一判据（§2.2），不对外暴露（接口响应里没有它）。
+#
+# Spec22 §2.1：**删掉了 phone 与 ip 两列**（不可逆）。email 成为必填的唯一定位键
+# ——注册要过邮箱验证码，所以"至少填一项联系方式"这个二选一不存在了。
+# ip 一列连同它的冷却索引一并删除：注册的防刷改由邮箱验证码承担（§2.5），
+# 于是 register_requests 在本仓第一次不含任何非必要 PII。
+# 存量行的 email 可能是 NULL（旧申请只有手机号），故本列**可空**——读路径要容忍。
 _CREATE_REGISTER_REQUESTS_TABLE = """
 CREATE TABLE IF NOT EXISTS register_requests (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL,             -- 申请的用户名（同意时原样建号）
     password_hash TEXT NOT NULL,             -- bcrypt；同意后置为 ''（§2.1）
-    phone         TEXT,                      -- 手机号（纯数字 11 位）；与 email 至少有一个
-    email         TEXT,                      -- 邮箱；与 phone 至少有一个
+    email         TEXT,                      -- 邮箱（唯一联系方式；存量旧行可能为 NULL）
     wechat        TEXT NOT NULL,             -- 用于支付的微信昵称（管理员对账用）
-    ip            TEXT NOT NULL,             -- 提交来源 IP（防重复判据，不出接口）
     status        TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
     created_at    TEXT NOT NULL,             -- 提交时刻（UTC ISO）
     reviewed_at   TEXT                       -- 同意/拒绝的时刻（NULL = 尚未处理）
 )
 """
-
-# 冷却期查询走这条索引：WHERE ip = ? AND created_at >= ? ORDER BY id DESC
-_CREATE_REGISTER_REQUESTS_IP_INDEX = (
-    "CREATE INDEX IF NOT EXISTS idx_register_requests_ip "
-    "ON register_requests(ip, created_at DESC, id DESC)"
-)
 
 # 列表查询走这条：pending 优先 + 组内 id 倒序（§6.4）
 _CREATE_REGISTER_REQUESTS_STATUS_INDEX = (
@@ -292,6 +288,55 @@ _CREATE_RECHARGE_REQUESTS_STATUS_INDEX = (
     "ON recharge_requests(status, id DESC)"
 )
 
+# 邮箱验证码（Spec22 §5.2）：只装**最近 TTL 内**的码，发一次码顺手清一次过期行。
+#
+# **不是台账**：与 register_requests / recharge_requests 不同，这张表没有 status、
+# 没有"同意/拒绝"、不保留历史（§3.3-10）。别把它当审计表用。
+# purpose 一列是这个设计的关键：三个场景（注册 / 登录 / 改密码）共一张表，就必须
+# 回答"这个码是给哪个场景发的"——**校验时按 purpose 匹配**，否则一个为"注册"发的
+# 码可以直接拿去登录（§2.2）。
+# 刻意**没有** used 标记：用户要的是"TTL 内只要有一个对了都算数"（§2.2）。
+# 刻意**不给 code 加索引**：没有任何查询按 code 走（查的是 email+purpose+时间）。
+_CREATE_EMAIL_VERIFICATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS email_verifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT NOT NULL,   -- 已小写化（§2.8，路由层保证）
+    purpose    TEXT NOT NULL,   -- register | login | reset（发码时按场景隔离，§2.2）
+    code       TEXT NOT NULL,   -- 4 位数字串，1000~9999（§2.3）
+    created_at TEXT NOT NULL    -- 发码时刻（UTC ISO）
+)
+"""
+
+# 三个查询都走这条：冷却（最近一条）、校验（TTL 内的全部）、清理（过期的）
+_CREATE_EMAIL_VERIFICATIONS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_email_verifications_lookup "
+    "ON email_verifications(email, purpose, created_at DESC)"
+)
+
+# 入口点击（Spec22 §5.3）：一行 = 某个事件被某个 IP 点过**一次**。
+# `UNIQUE(event, ip)` 是业务约束，不是数据库洁癖：它让 COUNT(*) 直接等于
+# "不重复 IP 数"，且 INSERT OR IGNORE 天然幂等——两个并发请求同时到达也只会记
+# 一行（§2.9）。不要在应用层写"先查再插"，那是两个线程能同时通过检查的经典竞态。
+# 唯一性是**永久**的（直到管理端点「清空入口统计」），没有时间窗口（§2.9）。
+_CREATE_CLICK_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS click_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    event      TEXT NOT NULL,   -- 见 _CLICK_EVENTS 白名单
+    ip         TEXT NOT NULL,   -- auth.client_ip(request)；只落库、只参与 COUNT（§2.9）
+    created_at TEXT NOT NULL,
+    UNIQUE(event, ip)           -- 去重就靠它，配 INSERT OR IGNORE
+)
+"""
+
+# 统计走这条：SELECT event, COUNT(*) ... GROUP BY event
+_CREATE_CLICK_EVENTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_click_events_event ON click_events(event)"
+)
+
+# 埋点事件白名单（§5.5，路由与 get_click_stats 共用，不拼接外部输入）。
+# 「点击登录主页」的口径是"打开登录页"（用户已确认，§2.9）。
+_CLICK_EVENTS = ("login_page", "register", "community", "gallery", "recharge")
+
 # 来源 / 状态白名单（校验用，不拼接外部输入）
 _RECHARGE_SOURCES = ("user", "overdue")
 _RECHARGE_STATUSES = ("pending", "approved", "rejected")
@@ -320,6 +365,10 @@ TASK_ID_SEQ_KEY = "task_id_seq"
 # app_meta 键：user_quota 存量回填的执行时间（UTC ISO，Spec18 §5.1e）。
 # 信息性——真正的幂等判据是 sqlite_master 里表存在与否（§5.1e），这个键只供排障。
 QUOTA_BACKFILLED_KEY = "quota_backfilled_at"
+
+# app_meta 键：入口点击统计的上次清零时间（UTC ISO，Spec22 §5.5）。
+# 与 usage_cleared_at / feedback_cleared_at 同款——它是本仓的**第三个**清零口径。
+CLICKS_CLEARED_KEY = "clicks_cleared_at"
 
 
 def _now_iso() -> str:
@@ -351,11 +400,12 @@ def _row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict 
 
     新增：`quota_limit`（users 列）、`used`（user_quota 累计，见 _USER_SELECT）。
 
-    Spec21 §5.1：再带出 `phone` / `email`（联系方式，可能为 None）。它们会流向 5 个
-    地方，其中**只有 `list_users()` → `GET /api/admin/users` 是接口响应**（仅管理员）；
-    其余四处（get_user_by_id / get_user_by_username / set_user_quota /
-    approve_register_request）的调用方都只取自己需要的字段再手写一个小 dict 返回，
-    不会把整个 dict 直接 `_ok(...)` 出去。**新增读 users 的路由时要保持这个约定。**
+    Spec21 §5.1 带出了 `phone` / `email` 两项联系方式；**Spec22 §5.1 起只剩 `email`
+    一项 PII**（`phone` 列已从库里删掉）。它仍然会流向若干地方，其中**只有
+    `list_users()` → `GET /api/admin/users` 是接口响应**（仅管理员）；其余
+    （get_user_by_id / get_user_by_username / set_user_quota / approve_register_request）
+    的调用方都只取自己需要的字段再手写一个小 dict 返回，不会把整个 dict 直接
+    `_ok(...)` 出去。**新增读 users 的路由时要保持这个约定。**
 
     `with_secret=True` 全仓只有 `get_user_by_username` 一处（登录校验密码）。
     """
@@ -368,8 +418,7 @@ def _row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False) -> dict 
         "created_at": row["created_at"],
         "quota_limit": int(row["quota_limit"]),
         "used": int(row["used"]),
-        "phone": row["phone"],        # Spec21：可能为 None（管理员手工建的号）
-        "email": row["email"],        # Spec21：同上
+        "email": row["email"],        # Spec22：唯一联系方式，可能为 None（管理员手工建的号）
     }
     if with_secret:
         record["password_hash"] = row["password_hash"]
@@ -501,14 +550,15 @@ def _register_row_to_dict(row: sqlite3.Row | None, *, with_secret: bool = False)
     批准路由的预检两处。列表接口（GET /api/admin/register-requests）
     拿到的字典在结构上就不可能有这个键。
 
-    另外**不带出 `ip`**：它只服务于冷却期判定，接口层没有它的位置（§2.2）。
+    Spec22 §5.1：`phone` 与 `ip` 两列随需求 3 一起从库里删掉了，所以本函数
+    **没有**"要记得不带出 ip"这回事了——列都没了。剩下的唯一联系方式是 `email`
+    （存量旧行可能为 NULL）。
     """
     if row is None:
         return None
     record = {
         "id": row["id"],
         "username": row["username"],
-        "phone": row["phone"],
         "email": row["email"],
         "wechat": row["wechat"],
         "status": row["status"],
@@ -607,10 +657,8 @@ def _migrate_users_quota_limit(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_users_contact(conn: sqlite3.Connection) -> None:
-    """存量库补 users.phone / users.email（Spec21 §5.1），并把已开通用户的联系方式回填一次。
+    """存量库补 users.email（Spec21 §5.1），并把已开通用户的联系方式回填一次。
 
-    两列**独立**判存在性，不共用一个 if：万一上一次跑了个半截（phone 加了、email 没加），
-    共用一个判断会让 email 永远补不上。
     回填只在"确实补过列"的那次跑：库里的 register_requests 是唯一来源，
     它不会变（Spec19 的申请行只增不隐），所以回填天然一次性。
 
@@ -619,32 +667,84 @@ def _migrate_users_contact(conn: sqlite3.Connection) -> None:
 
     已知边界（§3.3-7，**不修**）：用户被删后重建同名账号，回填会把前一个人的
     联系方式填到新账号上——那是同名的两个人，本函数无法区分。
+
+    Spec22 §5.1：本函数原来还负责 `phone` 那半（补列 + 回填），随电话三列的
+    删除一起去掉了——现在只补/回填 `email` 一列。⚠️ 位置约束：它必须排在
+    `_migrate_drop_phone_and_ip` **之前**（顺序反了，旧库的 phone 会被这里加回来）。
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-    added = False
-    if "phone" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
-        added = True
     if "email" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
-        added = True
-    if not added:
+    else:
         return
     # ORDER BY r.id DESC LIMIT 1 是**纯防御**：users.username 有 UNIQUE，所以同一个
     # 用户名最多只会有一条 approved 申请（第二条会在建号时撞 40001）。写明它只是
     # 为了让"取哪一条"有一个确定的答案。
     conn.execute(
         "UPDATE users SET "
-        "  phone = (SELECT r.phone FROM register_requests r "
-        "           WHERE r.username = users.username AND r.status = 'approved' "
-        "           ORDER BY r.id DESC LIMIT 1), "
         "  email = (SELECT r.email FROM register_requests r "
         "           WHERE r.username = users.username AND r.status = 'approved' "
         "           ORDER BY r.id DESC LIMIT 1) "
         "WHERE EXISTS (SELECT 1 FROM register_requests r "
         "              WHERE r.username = users.username AND r.status = 'approved')"
     )
-    logger.info("users.phone / users.email 列已补齐并回填", extra={"event": "db.migrate"})
+    logger.info("users.email 列已补齐并回填", extra={"event": "db.migrate"})
+
+
+def _migrate_drop_phone_and_ip(conn: sqlite3.Connection) -> None:
+    """删掉 users.phone、register_requests.phone、register_requests.ip（Spec22 §2.1）。
+
+    为什么是真删而不是留着不用：见 §2.1 —— 留一列谁都不读写的死数据，是本仓
+    反复记录的那类"看起来还在生效"的陷阱。代价（历史电话数据永久丢失）已确认。
+
+    位置约束：必须排在 _migrate_users_contact **之后**。顺序反了的话，
+    一个 Spec21 之前的旧库会先被"无列可删"跳过，然后 _migrate_users_contact
+    再把 phone 列加回来 —— 白删一次。
+
+    三列各自独立判存在性：不许共用一个 if。上一次跑了个半截（删了 phone、
+    没删 ip）时，共用一个判断会让 ip 永远删不掉。
+
+    SQLite 的 DROP COLUMN 需要 3.35+（2021-03）。老版本上只记一条**显眼**的
+    warning 并整段跳过：那几列留着，但没有任何代码读写它们（等于自动降级成
+    "保留列"形态），功能零影响。让服务因为一个删列失败而起不来，是拿可用性换洁癖。
+    """
+    user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    req_cols = {r["name"] for r in conn.execute("PRAGMA table_info(register_requests)").fetchall()}
+    targets = (
+        [("users", c) for c in ("phone",) if c in user_cols]
+        + [("register_requests", c) for c in ("phone", "ip") if c in req_cols]
+    )
+    if not targets:
+        return
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        logger.warning(
+            f"SQLite {sqlite3.sqlite_version} 版本过低，跳过删列"
+            "（users.phone / register_requests.phone|ip）——三列保留，但无代码读写",
+            extra={"event": "db.migrate", "reason": "sqlite_too_old"},
+        )
+        return
+    # ip 上有索引，SQLite 拒绝删一个被索引引用的列 —— 必须先删索引。
+    # 这不是可选步骤，是 DROP COLUMN 的前置条件（§2.1）。
+    conn.execute("DROP INDEX IF EXISTS idx_register_requests_ip")
+    for table, col in targets:
+        # 表名/列名来自上面的字面量白名单，非外部输入
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+    conn.commit()
+    logger.info("已删除 phone / ip 列", extra={"event": "db.migrate"})
+
+
+def _migrate_lowercase_emails(conn: sqlite3.Connection) -> None:
+    """把存量邮箱统一成小写（Spec22 §2.8）。
+
+    不做的话，一个在 Spec21 时代用大写邮箱注册的账号，**邮箱登录永远进不去**
+    （而用户完全不知道为什么）。两条 UPDATE 各自幂等：第二次启动影响 0 行。
+
+    注意这边**不碰**空串/NULL：`email <> LOWER(email)` 对 NULL 求值为 NULL，
+    行不会被选中，正是我们要的。
+    """
+    for table in ("users", "register_requests"):
+        conn.execute(f"UPDATE {table} SET email = LOWER(email) WHERE email <> LOWER(email)")
+    conn.commit()
 
 
 def _migrate_usage_style(conn: sqlite3.Connection) -> None:
@@ -753,16 +853,30 @@ def init_db() -> None:
         # 存量库行为一致，**不需要**迁移函数（与 Spec18 的 _backfill_user_quota 不同，
         # 那个要给已存在的数据补一份派生账本，这里没有已存在的数据）。
         conn.execute(_CREATE_REGISTER_REQUESTS_TABLE)
-        conn.execute(_CREATE_REGISTER_REQUESTS_IP_INDEX)
+        # Spec22 §5.8 删除：conn.execute(_CREATE_REGISTER_REQUESTS_IP_INDEX)
+        #   ip 列已删，留着这句每次启动都撞 "no such column: ip"，服务直接起不来（§2.1）。
         conn.execute(_CREATE_REGISTER_REQUESTS_STATUS_INDEX)
         # Spec21 §5.3：充值台账。与 register_requests 同类——全新空表，
         # CREATE TABLE IF NOT EXISTS 对新库/存量库行为一致，不需要迁移函数。
         conn.execute(_CREATE_RECHARGE_REQUESTS_TABLE)
         conn.execute(_CREATE_RECHARGE_REQUESTS_USER_INDEX)
         conn.execute(_CREATE_RECHARGE_REQUESTS_STATUS_INDEX)
-        # Spec21 §5.1：users 补 phone/email 并回填。
+        # Spec22 §5.2 / §5.3：邮箱验证码表 + 入口点击表。与 recharge_requests 同款——
+        # 全新空表，CREATE TABLE IF NOT EXISTS 对新库/存量库行为一致，不需要迁移函数。
+        conn.execute(_CREATE_EMAIL_VERIFICATIONS_TABLE)
+        conn.execute(_CREATE_EMAIL_VERIFICATIONS_INDEX)
+        conn.execute(_CREATE_CLICK_EVENTS_TABLE)
+        conn.execute(_CREATE_CLICK_EVENTS_INDEX)
+        # Spec21 §5.1：users 补 email 并回填。
         # ⚠️ 位置约束：必须排在 _CREATE_REGISTER_REQUESTS_TABLE **之后**（回填要读它）。
         _migrate_users_contact(conn)
+        # Spec22 §5.1：删掉 users.phone / register_requests.phone / register_requests.ip。
+        # ⚠️ 位置约束：**必须排在 _migrate_users_contact 之后**。顺序反了的话，一个
+        #    pre-Spec21 的旧库会先被"无列可删"跳过、再被上面那行把 phone 加回来。
+        _migrate_drop_phone_and_ip(conn)
+        # Spec22 §2.8：存量邮箱小写化（否则大写邮箱的账号永远登录不进去）。
+        # 排在删列之后：保证**任何**读 email 的迁移都看到小写后的值。
+        _migrate_lowercase_emails(conn)
         # Spec10：建议状态收敛为 pending|resolved；老数据 read（已读）迁移为 pending
         conn.execute("UPDATE suggestions SET status = 'pending' WHERE status = 'read'")
         # Spec12 §5.1b：存量库补 images.wiki_used 列
@@ -822,6 +936,25 @@ def get_user_by_username(username: str) -> dict | None:
     return _row_to_dict(row, with_secret=True)
 
 
+def get_user_by_email(email: str) -> dict | None:
+    """按邮箱取用户（Spec22 §5.5：邮箱登录 / 改密码 / 发码查重都走它）。
+
+    **`ORDER BY id ASC LIMIT 1` 是口径，不是随手写的**：`users.email` 上
+    **没有** UNIQUE 约束（§2.8——加索引的风险是存量重复数据会让服务起不来，
+    而唯一性由发码前的查重保证）。两条同邮箱的存量账号因此是可能的，必须给
+    "登录进哪一个"一个确定的答案：**先注册的那个**（id 小的）。
+
+    默认**不带** `password_hash`（`_row_to_dict` 的约定）——本函数的三个消费者
+    都不校验密码。传进来的 email 由路由保证已 strip + lower（§2.8，db 层不做
+    隐式转换）。
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            f"{_USER_SELECT} WHERE u.email = ? ORDER BY u.id ASC LIMIT 1", (email,)
+        ).fetchone()
+    return _row_to_dict(row)
+
+
 def count_users() -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()
@@ -837,15 +970,18 @@ def count_admins() -> int:
 # ---------- 写操作 ----------
 
 def create_user(username: str, password_hash: str, is_admin: bool = False,
-                phone: str | None = None, email: str | None = None) -> dict:
-    """建号。phone / email（Spec21 §5.1）只有注册审批路径会传——
-    `POST /api/admin/users`（管理员手工建号）不传，两者落 NULL，前端显示「无」。"""
+                email: str | None = None) -> dict:
+    """建号。email（Spec21 §5.1 加的列）只有注册审批路径会传——
+    `POST /api/admin/users`（管理员手工建号）不传，落 NULL，前端显示「无」。
+
+    Spec22 §5.1：`phone` 参数**整个删掉**，不是留个默认值——留参数就是留一条
+    能写进已删列的路。"""
     try:
         with _connect() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, password_hash, is_admin, created_at, phone, email) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (username, password_hash, 1 if is_admin else 0, _now_iso(), phone, email),
+                "INSERT INTO users (username, password_hash, is_admin, created_at, email) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (username, password_hash, 1 if is_admin else 0, _now_iso(), email),
             )
             conn.commit()
             user_id = cur.lastrowid
@@ -1058,10 +1194,15 @@ def set_meta(key: str, value: str) -> None:
 
 
 def get_cleared_times() -> dict:
-    """usage / feedback 两个"上次清零时间"，供 GET /api/admin/stats 一并返回。"""
+    """usage / feedback / clicks 三个"上次清零时间"，供 GET /api/admin/stats 一并返回。
+
+    Spec22 §5.5：多一个 `clicks_cleared_at`。`GET /api/admin/stats` 那句
+    `stats.update(db.get_cleared_times())` **一个字都不用改**。
+    """
     return {
         USAGE_CLEARED_KEY: get_meta(USAGE_CLEARED_KEY),
         FEEDBACK_CLEARED_KEY: get_meta(FEEDBACK_CLEARED_KEY),
+        CLICKS_CLEARED_KEY: get_meta(CLICKS_CLEARED_KEY),
     }
 
 
@@ -1793,15 +1934,19 @@ def delete_comment(comment_id: int) -> None:
 
 # ---------- 注册申请与审批（Spec19 §5.1d）----------
 
-def create_register_request(username: str, password_hash: str, phone: str | None,
-                            email: str | None, wechat: str, ip: str) -> dict:
-    """插入一条 pending 申请，返回完整记录（**不含** password_hash）。"""
+def create_register_request(username: str, password_hash: str,
+                            email: str | None, wechat: str) -> dict:
+    """插入一条 pending 申请，返回完整记录（**不含** password_hash）。
+
+    Spec22 §5.1：`phone` / `ip` 两个参数**整个删掉**（调用方也不再算 ip）——
+    留参数就是留一条能写进已删列的路。防重改由邮箱验证码承担（§2.5）。
+    """
     with _connect() as conn:
         cur = conn.execute(
             "INSERT INTO register_requests "
-            "(username, password_hash, phone, email, wechat, ip, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
-            (username, password_hash, phone, email, wechat, ip, _now_iso()),
+            "(username, password_hash, email, wechat, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (username, password_hash, email, wechat, _now_iso()),
         )
         conn.commit()
         request_id = cur.lastrowid
@@ -1818,7 +1963,7 @@ def get_register_request(request_id: int, *, with_secret: bool = False) -> dict 
 
 
 def list_register_requests() -> list[dict]:
-    """全部申请：**pending 优先**，组内 id 倒序（最新在前）。不含 password_hash / ip。
+    """全部申请：**pending 优先**，组内 id 倒序（最新在前）。不含 password_hash。
 
     排序写成 `ORDER BY (status = 'pending') DESC, id DESC`：
     SQLite 里布尔表达式求值为 0/1，所以"是 pending 的排前面"是一行 SQL 的事。
@@ -1832,23 +1977,31 @@ def list_register_requests() -> list[dict]:
     return [_register_row_to_dict(r) for r in rows]
 
 
-def find_recent_register_by_ip(ip: str, window_seconds: int) -> dict | None:
-    """该 IP 在冷却期内的最近一条申请；没有则 None（Spec19 §2.2）。
+def find_pending_register_by_email(email: str) -> dict | None:
+    """该邮箱是否已有一条**待审批**申请；有则返回那一行，没有则 None。
 
-    截止时刻在 **Python 侧**算好再传进 SQL，不用 SQLite 的 datetime('now','-1 day')：
-    created_at 是 `YYYY-MM-DDTHH:MM:SS.mmmZ` 形态（_now_iso），
-    与 SQLite 默认的 `YYYY-MM-DD HH:MM:SS` 格式**字符串不可比**。
-    同格式同宽度的 ISO 串，字典序即时间序，直接 `>=` 比较是安全的。
+    Spec22 §2.4 新增的判据：删掉 IP 冷却之后，"同一邮箱反复提交、你反复收到
+    同一份审批邮件"就只剩这一道闸门。**只看 pending**——已同意/已拒绝的历史行
+    不该挡住新的申请（Spec19 §2.2：被拒了可以再申请，那正是台账要保留的东西）。
+
+    §5.5 的函数清单里漏了这一个（清单只列了 `get_user_by_email` 与四个新表的
+    函数），但 §6.2 第 5 条的 pending 分支必须有它——以 §2.4 / §6.2 为准。
+
+    email 由路由层小写化后传入（§2.8），这里不做隐式转换。
     """
-    cutoff = (datetime.now(timezone.utc)
-              - timedelta(seconds=window_seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM register_requests WHERE ip = ? AND created_at >= ? "
-            "ORDER BY id DESC LIMIT 1",
-            (ip, cutoff),
+            "SELECT * FROM register_requests "
+            "WHERE email = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+            (email,),
         ).fetchone()
     return _register_row_to_dict(row)
+
+
+# Spec22 §5.5 删除：find_recent_register_by_ip(ip, window_seconds)
+#   它的唯一消费者是"同一 IP 24 小时一次"的注册冷却（Spec19 §2.2），
+#   需求 3 把那条限制整个删掉了。防重改由邮箱验证码承担。
+#   注意 auth.client_ip 仍在——它还有登录限速与点击埋点两个消费者（§2.11）。
 
 
 def approve_register_request(request_id: int, quota_limit: int) -> dict | None:
@@ -1875,14 +2028,14 @@ def approve_register_request(request_id: int, quota_limit: int) -> dict | None:
     now = _now_iso()
     try:
         with _connect() as conn:
-            # Spec21 §5.1：联系方式直接取申请行（get_register_request(with_secret=True)
-            # 已经把它们带出来了）。手工建号那条路不传，落 NULL。
+            # Spec21 §5.1 / Spec22 §5.1：联系方式（只剩 email）直接取申请行
+            # （get_register_request(with_secret=True) 已经把它带出来了）。
+            # 手工建号那条路不传，落 NULL。旧申请行的 email 可能是 NULL。
             cur = conn.execute(
                 "INSERT INTO users "
-                "(username, password_hash, is_admin, created_at, quota_limit, phone, email) "
-                "VALUES (?, ?, 0, ?, ?, ?, ?)",
-                (req["username"], req["password_hash"], now, quota_limit,
-                 req["phone"], req["email"]),
+                "(username, password_hash, is_admin, created_at, quota_limit, email) "
+                "VALUES (?, ?, 0, ?, ?, ?)",
+                (req["username"], req["password_hash"], now, quota_limit, req["email"]),
             )
             user_id = cur.lastrowid
             # 并发判据用 WHERE ... AND status='pending' 的 rowcount，而不是"先查后写"：
@@ -1977,7 +2130,7 @@ def find_recent_recharge_by_user(user_id: int, window_seconds: int) -> dict | No
     冷却期管的是"提交这个动作"的频次，也就是发信的频次——被拒 / 已同意之后马上
     再点一次，同样不该再发一封信（那正是刷邮箱的路径）。
 
-    截止时刻的算法与 find_recent_register_by_ip 完全同款（那边有详细理由）：
+    截止时刻的算法与 find_recent_email_verification 完全同款（那边有详细理由）：
     created_at 是 `YYYY-MM-DDTHH:MM:SS.mmmZ`，同格式同宽度的 ISO 串字典序即时间序，
     所以在 Python 侧算好 cutoff 再交给 SQL 比字符串，**不要**用 SQLite 的 datetime()。
     """
@@ -2074,3 +2227,131 @@ def delete_recharge_request(request_id: int) -> bool:
         cur = conn.execute("DELETE FROM recharge_requests WHERE id = ?", (request_id,))
         conn.commit()
     return cur.rowcount > 0
+
+
+# ---------- 邮箱验证码（Spec22 §5.5）----------
+# 生成码的**纯逻辑**在 verifications.py（不读库）；要读库的三条规则在这里：
+# TTL、重发冷却、"TTL 内任一命中都算数"（§14.2 说明了这条切法的理由）。
+
+def create_email_verification(email: str, purpose: str, code: str,
+                              ttl_seconds: int) -> dict:
+    """落一个码，**同一个事务**里顺手删掉已过期的行，返回新行。
+
+    为什么顺手清理而不是定时任务：表里最多只有"最近 TTL 内发出的码"，
+    不可能长大（§2.2）。为一个几十行的表引入一个定时器不值得（§14.3-2）。
+
+    cutoff 在 **Python 侧**算好再传进 SQL，不用 SQLite 的 datetime('now', ...)：
+    created_at 是 `YYYY-MM-DDTHH:MM:SS.mmmZ` 形态（_now_iso），与 SQLite 默认的
+    `YYYY-MM-DD HH:MM:SS` 格式**字符串不可比**。同格式同宽度的 ISO 串，
+    字典序即时间序，直接比较是安全的（这是本仓的既定做法）。
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with _connect() as conn:
+        conn.execute("DELETE FROM email_verifications WHERE created_at < ?", (cutoff,))
+        cur = conn.execute(
+            "INSERT INTO email_verifications (email, purpose, code, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (email, purpose, code, _now_iso()),
+        )
+        conn.commit()
+        row_id = cur.lastrowid
+    return get_email_verification(row_id)
+
+
+def get_email_verification(verification_id: int) -> dict | None:
+    """按 id 取一行（仅供 create_email_verification 回读刚插入的那行）。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM email_verifications WHERE id = ?", (verification_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def find_recent_email_verification(email: str, purpose: str,
+                                   window_seconds: int) -> dict | None:
+    """该邮箱在该场景下冷却期内的最近一条码；没有则 None（重发冷却的判据）。
+
+    按 **(email, purpose)** 隔离，不是只看 email：给"注册"发的码与给"登录"发的
+    码是两个独立的 1 分钟窗口，互不影响（§2.2 的 purpose 列就是这个用途）。
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=window_seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM email_verifications "
+            "WHERE email = ? AND purpose = ? AND created_at >= ? "
+            "ORDER BY id DESC LIMIT 1",
+            (email, purpose, cutoff),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def match_email_verification(email: str, purpose: str, code: str,
+                             ttl_seconds: int) -> bool:
+    """TTL 内该 (邮箱, 场景) 是否存在这个码。
+
+    `SELECT 1 ... LIMIT 1` 而非数数：只要有一个命中就算数——这正是用户要的
+    "10 分钟 TTL 内生成的数字串只要有一个对了都算数"（§2.2）。**同一时间可以有
+    多个有效的码**（重发过），它们全都算数。
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM email_verifications "
+            "WHERE email = ? AND purpose = ? AND code = ? AND created_at >= ? LIMIT 1",
+            (email, purpose, code, cutoff),
+        ).fetchone()
+    return row is not None
+
+
+# ---------- 入口点击统计（Spec22 §5.3 / §5.5）----------
+
+def record_click(event: str, ip: str) -> bool:
+    """记一次点击，返回**这是不是一个新记下的不重复 IP**（§2.9）。
+
+    返回值只用于决定要不要打日志——不是"成功了没"。重复点击（同 IP 同事件）
+    走 UNIQUE(event, ip) 被 INSERT OR IGNORE 静静吞掉，rowcount 为 0。
+
+    不要在应用层写"先查再插"：那是两个并发请求能同时通过检查的经典竞态，
+    而数据库的唯一约束天然是原子的。
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO click_events (event, ip, created_at) VALUES (?, ?, ?)",
+            (event, ip, _now_iso()),
+        )
+        conn.commit()
+    return cur.rowcount == 1
+
+
+def get_click_stats() -> dict:
+    """每个事件的**不重复 IP 数**，**恒含白名单里全部 5 个键**（没有记录的为 0）。
+
+    补齐缺键是刻意的：前端不用处理"这个键可能不存在"，也不用在模板里写 `?? 0`
+    （§6.8）。
+    """
+    stats = {event: 0 for event in _CLICK_EVENTS}
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT event, COUNT(*) AS n FROM click_events GROUP BY event"
+        ).fetchall()
+    for row in rows:
+        stats[row["event"]] = int(row["n"])
+    return stats
+
+
+def clear_clicks() -> int:
+    """清空入口点击统计（删行重计），返回删掉的行数。
+
+    与 Spec18 的 clear_usage 同款：**一个事务**里删行 + 写"上次清零时间"
+    ——清零与它必须同生同死，否则会出现"数字归零了、时间还是上一次"的错位。
+    它只重置统计区间，不动任何计费口径（点击本来就不计费，§6.7）。
+    """
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM click_events")
+        cleared = cur.rowcount
+        _upsert_meta(conn, CLICKS_CLEARED_KEY, _now_iso())
+        conn.commit()
+    return cleared

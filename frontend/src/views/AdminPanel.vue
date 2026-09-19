@@ -118,7 +118,9 @@
       <div v-for="r in requests" :key="r.id" class="reg-row">
         <div class="reg-row-info">
           <span class="reg-row-user">{{ r.username }}</span>
-          <span class="reg-row-cell">手机号：{{ r.phone || '—' }}</span>
+          <!-- Spec22 §7.7：手机号那一格整行删除（库里已经没有这一列了，§5.1）——
+               留一个永远显示「—」的格子比删掉更糟。邮箱现在是必填，只有 Spec22
+               之前的旧申请才可能是空的（那条 pending 仍能审批，只是不发信）。 -->
           <span class="reg-row-cell">邮箱：{{ r.email || '—' }}</span>
           <span class="reg-row-cell">支付微信：{{ r.wechat }}</span>
           <span class="reg-row-cell reg-row-time">{{ r.created_at_beijing }}</span>
@@ -239,11 +241,10 @@ async function loadRecharges() {
   }
 }
 
-// Spec21 §7.2：邮箱与电话都显示（有哪个显示哪个），都没有 → 「无」。
-// 顺序固定「邮箱 / 电话」——邮箱是邮件主题里优先取的那个（Spec21 §2.7）。
+// Spec22 §7.7：库里已经没有任何电话了（§5.1），所以这一列只可能是邮箱或「无」。
+// 「无」= 管理员手工建的号（create_user 不带 email）——**这是允许的形态**（Spec21 §3.3-6）。
 function contactText(u) {
-  const parts = [u.email, u.phone].filter(Boolean)
-  return parts.length ? parts.join(' / ') : '无'
+  return u.email || '无'
 }
 
 function flash(msg) {
@@ -373,6 +374,12 @@ async function remove(u) {
 // ——与 Spec18 §7.5 对 QUOTA_LIMIT_MAX 的处理同一个理由。管理员填多少由他跟
 // 用户的实际付款决定，本来就不该被一个前端默认值暗示。
 async function approve(r) {
+  // Spec22 §7.7：先说清"按下去会给申请者发一封信"这个副作用（§2.12）。
+  // ⚠️ confirm 必须在 prompt **之前**——反过来的话，管理员填完额度再点"取消 confirm"，
+  // 前面那次输入就白填了。请求逻辑一个字没动（两条 approve 路由的响应与错误码不变）。
+  if (!window.confirm(
+    `确认通过 ${r.username} 的注册申请？通过后会向 ${r.email || '（该申请没有邮箱）'} 发送一封通知邮件。`
+  )) return
   const input = window.prompt(
     `同意「${r.username}」的注册申请，并设置服务限额（累计可用次数）：`
   )
@@ -438,6 +445,11 @@ async function removeRequest(r) {
 // **不传 prompt 的第二个参数**（不给默认值）：次数该由管理员按实收金额决定，
 // 写死任何数字都是复制一个会漂移的常量（与 Spec19 §7.5c 同款理由）。
 async function approveRecharge(c) {
+  // Spec22 §7.7：先确认，并在确认里说明"通过后会向该用户邮箱发一封到账通知"。
+  // 同样 confirm 在 prompt 之前（理由见 approve）。请求逻辑一个字没动。
+  if (!window.confirm(
+    `确认通过这笔充值（${c.username}）？通过后会向该用户邮箱发送一封到账通知。`
+  )) return
   const input = window.prompt(
     `同意「${c.username}」的充值申请，并填写加多少次服务额度：`
   )

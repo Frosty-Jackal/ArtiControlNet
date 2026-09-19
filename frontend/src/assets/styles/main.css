@@ -758,6 +758,15 @@ input, textarea {
   text-align: center;
 }
 
+/* Spec22：改密码成功的绿色提示行。与 .login-error 同排、互不覆盖。
+   为什么要有它：改完密码只把人送回登录页、什么都不说，用户分不清"成功了"和"没点对"（§2.7）。 */
+.login-ok {
+  color: #86efac;
+  font-size: 13px;
+  margin: 6px 0 0;
+  text-align: center;
+}
+
 /* ---------- 管理端 ---------- */
 
 .admin-panel {
@@ -1274,6 +1283,26 @@ option {
   color: var(--text-muted);
 }
 
+/* Spec22 §7.10：登录页两个新入口（并排、弱化，不与「新用户注册」抢主次） */
+.login-alt {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-link:hover {
+  color: var(--purple-300);
+}
+
 /* Spec19 §7.3：注册申请弹窗（遮罩/卡片抄 HelpModal 那套） */
 .reg-overlay {
   position: fixed;
@@ -1362,6 +1391,46 @@ option {
   color: var(--text-muted);
   margin-bottom: 2px;
 }
+
+/* Spec22 §7.10：邮箱 + 「获取验证码」同一行（注册弹窗、邮箱登录/改密码弹窗共用） */
+.reg-code-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.reg-code-row .login-input {
+  flex: 1;
+  min-width: 0; /* 输入框比按钮长时不许把这一行撑破 */
+}
+
+.btn-code {
+  white-space: nowrap; /* 倒计时数字变化时按钮不跳宽 */
+  flex-shrink: 0;
+  padding: 11px 14px; /* 与 .login-input 同值，同一行的两个元素一样高 */
+  font-size: 13px;
+  color: var(--purple-300);
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.btn-code:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: rgba(124, 58, 237, 0.18);
+}
+
+.btn-code:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* Spec22 §7.10 的 .email-auth-card 不需要写：它只用 .reg-card 那一套（尺寸与圆角
+   都是 420px / --radius-xl，已经一模一样），再写一遍就是同值的第二份副本。
+   组件里那个 class 名保留，当作语义钩子。 */
 
 /* 收款码块：标题语来自后端 config.price_notice，前端零副本 */
 .reg-pay {
