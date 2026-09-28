@@ -4,12 +4,15 @@
       <h2>用户管理</h2>
       <button class="btn-clear" @click="emit('close')">返回聊天</button>
     </div>
-    <!-- Spec19 §7.5a：原文案"无公开注册"不再成立——注册申请与审批已上线。
-         待审批条数写进这一行，免得管理员每次都要滚过用户表才知道有没有活干。 -->
+    <!-- Spec25 §2.1：Spec19 §7.5a 的「注册申请与审批已上线 + 待审批条数」整段作废。
+         注册早就是自助的（Spec23），没有"申请"可审、也没有"待审批"这个状态。
+         ⚠️ 被删的那行不只是过时文案——它引用的 pendingCount 在 Spec23 §7.6 就
+         从 script 里删掉了，渲染出来一直是「待审批注册申请  条」（dev 控制台
+         还有一条 property not defined 告警）。
+         ⚠️ .tip-pending 这条 CSS **不许删**：下面「待审批充值」那行还在用它。 -->
     <p class="admin-tip">
       当前登录：{{ auth.username }}（{{ auth.isAdmin ? '管理员' : '普通用户' }}）
-      · 账号可由管理员创建，或由用户申请后审批开通
-      · <b class="tip-pending">待审批注册申请 {{ pendingCount }} 条</b>
+      · 账号可由管理员创建，或由用户自由注册
       · <b class="tip-pending">待审批充值 {{ pendingRechargeCount }} 条</b>
     </p>
 
@@ -18,14 +21,14 @@
       <input
         v-model="newName"
         class="login-input"
-        placeholder="新用户名（≥2 字符）"
+        placeholder="新用户名（2~32 字符）"
         autocomplete="off"
       />
       <input
         v-model="newPass"
         type="password"
         class="login-input"
-        placeholder="初始密码（≥6 位）"
+        placeholder="初始密码（≥2 位）"
         autocomplete="new-password"
       />
       <button class="btn-primary" type="submit" :disabled="creating">
@@ -209,11 +212,16 @@ function flash(msg) {
   setTimeout(() => (notice.value = ''), 2500)
 }
 
+// Spec25 §7.2：下限 6 → 2，与后端 auth.MIN_PASSWORD_LEN 同值（跨语言，前端
+//   import 不到那个 Python 常量，只能同值副本——**改要一起改**）。
+//   上限（用户名 32 / 密码 72）**不在这里判**：规则只有一个地方，在后端；
+//   超上限时后端 40010 的 message 会落到下面那行 error 里（Spec25 §5.3）。
+//   ⚠️ pass 不能 trim（密码里的空格是有效字符），name 已经 trim 过——别统一。
 async function create() {
   const name = newName.value.trim()
   const pass = newPass.value
-  if (name.length < 2 || pass.length < 6) {
-    error.value = '用户名至少 2 个字符，密码至少 6 位'
+  if (name.length < 2 || pass.length < 2) {
+    error.value = '用户名至少 2 个字符，密码至少 2 位'
     return
   }
   error.value = ''
@@ -231,11 +239,12 @@ async function create() {
   }
 }
 
+// Spec25 §7.3：与 create() 同一条同值副本（下限 6 → 2）。上限同样交给后端。
 async function resetPassword(u) {
-  const pass = window.prompt(`为「${u.username}」设置新密码（至少 6 位）：`)
+  const pass = window.prompt(`为「${u.username}」设置新密码（至少 2 位）：`)
   if (!pass) return
-  if (pass.length < 6) {
-    error.value = '密码至少 6 位'
+  if (pass.length < 2) {
+    error.value = '密码至少 2 位'
     return
   }
   error.value = ''

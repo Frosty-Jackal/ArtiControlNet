@@ -32,6 +32,17 @@ MIN_PASSWORD_LEN = 2
 
 MAX_PASSWORD_LEN = 72          # bcrypt 只处理前 72 字节，上限在此截断校验
 
+# 用户名长度规则（**全仓唯一来源**）。Spec25 §2.4：设定用户名的路有两条
+# （自助注册 / 管理员建号），Spec23 之前只有注册那条有上限 32，管理员那条
+# 只有下限——同一个系统里"用户名最长多少"有两个答案，管理员能建出一个
+# 500 字符的名字。两个常量一次收口，两处 message 都由 f-string 拼出。
+# ⚠️ db.create_initial_admin 那道 ≥2（`db.py:927`）**故意不引用它**，理由与
+#    MAX_PASSWORD_LEN 上面那条同款：那是部署者写在 .env 里的值，不是用户输入；
+#    而且 db.py 对 auth 是函数内延迟 import，引用不了也不会去引用（§2.6）。
+MIN_USERNAME_LEN = 2
+
+MAX_USERNAME_LEN = 32
+
 # ---------- 登录限速（内存）----------
 # 限速的对象是**IP**，不是账号：同一个 IP 猜密码和猜验证码是一回事（§2.6）。
 _LOGIN_WINDOW_SECONDS = 300

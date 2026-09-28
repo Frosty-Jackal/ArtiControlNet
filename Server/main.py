@@ -1315,8 +1315,10 @@ async def register(payload: schemas.RegisterRequestCreate, request: Request,
     password = payload.password or ""
     email = _norm_email(payload.email)      # Spec22 §2.8：strip + lower 一条规则
     code = (payload.code or "").strip()
-    if not 2 <= len(username) <= 32:
-        raise RegisterRequestError("用户名需为 2~32 个字符")
+    if not auth.MIN_USERNAME_LEN <= len(username) <= auth.MAX_USERNAME_LEN:
+        raise RegisterRequestError(
+            f"用户名需为 {auth.MIN_USERNAME_LEN}~{auth.MAX_USERNAME_LEN} 个字符"
+        )
     if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
         raise RegisterRequestError(
             f"密码需为 {auth.MIN_PASSWORD_LEN}~{auth.MAX_PASSWORD_LEN} 位"
@@ -1761,13 +1763,19 @@ async def admin_create_user(payload: schemas.AdminCreateUserRequest, request: Re
     operator = request.state.user
     username = (payload.username or "").strip()
     password = payload.password or ""
-    if len(username) < 2:
-        raise CredentialsFormatError("用户名至少 2 个字符")
+    # Spec25 §2.4：与自助注册**同一份规则**（2~32）。改前这里只有下限，
+    # 管理员能建出任意长的用户名——用户表格与顶栏当场散架。
+    if not auth.MIN_USERNAME_LEN <= len(username) <= auth.MAX_USERNAME_LEN:
+        raise CredentialsFormatError(
+            f"用户名需为 {auth.MIN_USERNAME_LEN}~{auth.MAX_USERNAME_LEN} 个字符")
     # Spec22 §2.10：下限从写死的 6 降成 auth.MIN_PASSWORD_LEN。设定密码的路一共
     # 三条（注册 / 建号 / 重置），**同一份规则**——别在这里再写一个 6。
+    # Spec25 §2.5：message 与注册那条（40018）对齐成同一句话。原来那句是
+    #   "密码至少 2 位"，在密码**过长**（>72）时是反的——用户填 100 个字符，
+    #   系统回他"至少 2 位"，从这句话里看不出问题在哪。
     if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
         raise CredentialsFormatError(
-            f"密码至少 {auth.MIN_PASSWORD_LEN} 位")
+            f"密码需为 {auth.MIN_PASSWORD_LEN}~{auth.MAX_PASSWORD_LEN} 位")
     user = db.create_user(username, auth.hash_password(password), is_admin=False)
     logger.info("创建账号", extra={
         "event": "auth.admin.create_user", "request_id": request_id,
@@ -1833,9 +1841,11 @@ async def admin_reset_password(user_id: int, payload: schemas.AdminResetPassword
     operator = request.state.user
     password = payload.password or ""
     # Spec22 §2.10：与建号那处同一套常量（三处副本一次收口）。
+    # Spec25 §2.5：与建号那处同一句话（两处 message 必须逐字相同——
+    # 它们是同一条规则的两个出口）。
     if not auth.MIN_PASSWORD_LEN <= len(password) <= auth.MAX_PASSWORD_LEN:
         raise CredentialsFormatError(
-            f"密码至少 {auth.MIN_PASSWORD_LEN} 位")
+            f"密码需为 {auth.MIN_PASSWORD_LEN}~{auth.MAX_PASSWORD_LEN} 位")
     if db.get_user_by_id(user_id) is None:
         raise UserNotFoundError("用户不存在")
     db.update_password(user_id, auth.hash_password(password))

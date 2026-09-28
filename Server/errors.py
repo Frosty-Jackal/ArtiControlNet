@@ -65,10 +65,17 @@ class NotFoundError(AppError):
 
 # ---- 认证 / 授权（Spec2 §9，追加到 Spec §9）----
 class CredentialsFormatError(AppError):
-    """用户名或密码格式非法（用户名 <2 字符 / 密码 <auth.MIN_PASSWORD_LEN 位）。
+    """用户名或密码格式非法。
 
-    Spec22 §2.10：密码下限从 6 降到 2，所以"<6 位"这个说法不再成立——
-    下限由 `auth.MIN_PASSWORD_LEN` 定义，本类只负责抛，不定义规则。
+    长度规则由 `auth.MIN_USERNAME_LEN` / `MAX_USERNAME_LEN` /
+    `MIN_PASSWORD_LEN` / `MAX_PASSWORD_LEN` 定义，**本类只负责抛，不定义规则**，
+    也不枚举具体文案——原来那句"用户名 <2 字符 / 密码 <N 位"在 Spec25 之后
+    就不完整了（用户名有上限了、管理端也不再抛"<2 字符"那句）。
+
+    ⚠️ 40010 的 message 有三处消费者（登录路由、管理端建号、管理端重置密码），
+    其中后两处的密码 message 在 Spec25 §2.5 对齐成了注册那条的
+    「密码需为 2~72 位」。Spec22 §9 错误码表里 40010 那一行的 message 措辞
+    由此作废；**码与 status_code 一个字没变**。
     """
 
     def __init__(self, message="用户名或密码格式非法"):
