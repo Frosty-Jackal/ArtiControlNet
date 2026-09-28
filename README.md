@@ -1,5 +1,5 @@
 <div align="center">
-<img src="./GithubPage/assets/hero-banner.jpg" width="100%" alt="ArtiControlNet —— 赋能设计的 AIGC 系统">
+<img src="./GithubPage/assets/hero-banner.jpg" width="100%" alt="ArtiControlNet —— AI辅助设计的系统">
 </div>
 
 <p align="center">

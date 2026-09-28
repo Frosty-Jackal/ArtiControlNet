@@ -4,8 +4,10 @@
     <div class="conv-sidebar-top">
       <button
         class="conv-sidebar-new"
-        :disabled="currentId === null"
-        :title="currentId === null ? '已经在空对话里了' : '开始一段新对话'"
+        :disabled="!guest && currentId === null"
+        :title="guest
+          ? '登录后开始新对话'
+          : (currentId === null ? '已经在空对话里了' : '开始一段新对话')"
         @click="emit('new')"
       >
         ＋ 新对话
@@ -13,7 +15,9 @@
     </div>
 
     <div class="conv-list">
-      <p v-if="!conversations.length" class="conv-empty">还没有对话，点「新对话」开始</p>
+      <p v-if="!conversations.length" class="conv-empty">
+        {{ guest ? '登录后可保存并查看对话历史' : '还没有对话，点「新对话」开始' }}
+      </p>
       <div
         v-for="conv in conversations"
         :key="conv.id"
@@ -33,7 +37,10 @@
 <script setup>
 defineProps({
   conversations: { type: Array, default: () => [] },
-  currentId: { type: String, default: null }
+  currentId: { type: String, default: null },
+  // Spec24 §5.7：游客态。游客没有对话列表，但「＋ 新对话」必须**可点**
+  // ——它是用户点名的拦截点之一（点它 → 弹登录层）。
+  guest: { type: Boolean, default: false }
 })
 const emit = defineEmits(['new', 'open', 'delete'])
 

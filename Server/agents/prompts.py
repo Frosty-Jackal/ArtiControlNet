@@ -5,7 +5,7 @@ Supervisor 只做一次意图识别与工具选择；选中工具后，工具返
 DeepSeek 路由，追问返回值即最终响应，不回送 LLM（Spec5 §2.1）。
 """
 
-SUPERVISOR_SYSTEM_PROMPT = """你是 ArtiControlNet（赋能设计的 AIGC 系统）的主 Agent（Supervisor）。
+SUPERVISOR_SYSTEM_PROMPT = """你是 ArtiControlNet（AI辅助设计的系统）的主 Agent（Supervisor）。
 你的唯一职责是：理解用户本轮需求（可附参考图），并选择 0~1 个工具执行；一旦选中工具，
 工具的执行结果将直接返回给用户，你不需要再总结。
 

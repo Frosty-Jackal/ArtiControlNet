@@ -642,7 +642,11 @@ input, textarea {
   font-size: 14px;
 }
 
-.btn-logout {
+/* Spec24 §7.2：游客态的「登录」与登录态的「退出」是同一个位置、同一种视觉的另一个形态，
+   所以**合并选择器** —— 复制一份声明会变成两份会漂移的副本（§14 陷阱 12）。
+   只有 hover 分开：登录是"正向"动作，不该套退出那身红色告警色。 */
+.btn-logout,
+.btn-login-entry {
   padding: 6px 14px;
   font-size: 13px;
   color: var(--text-muted);
@@ -658,12 +662,46 @@ input, textarea {
   background: rgba(127, 29, 29, 0.2);
 }
 
+.btn-login-entry:hover {
+  color: var(--purple-300);
+  border-color: var(--purple-500);
+  background: var(--bg-surface-hover);
+}
+
 .login-page {
   height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
+}
+
+/* Spec24 §2.1：登录页从"整页"降级成"覆盖层"——它现在是 .app 的兄弟节点。
+   .login-page 原本是 height:100% + flex 居中，套上 fixed/inset 之后 height:100%
+   仍然成立（定位元素的包含块是视口），.login-card 一个字节不用改。
+   ⚠️ 选择器必须用**两个类**：只写 .login-overlay 会连带影响别的元素，
+   只写 .login-page 会把"非覆盖层"的登录页也固定住（现在没有那种用法，但选择器要表达意图）。
+   z-index 900 与 .reg-overlay 的 1000 错开：登录层在下，注册/邮箱/充值弹窗在上。 */
+.login-page.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: var(--bg-primary); /* 不透明：背后的游客界面不该从缝里透出来 */
+}
+
+/* Spec24 §7.2：顶栏的登录状态。12px + nowrap —— 横条已经很挤，它不能换行。
+   ⚠️ flex-shrink: 0 不能省：横条是 flex row，不加它这段文字会被压扁换行。 */
+.login-state {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Spec24 §7.2：登录层底部的「← 返回继续浏览」。复用已有的 .btn-link（Login.vue 的
+   「邮箱登录 / 修改密码」就是它），这里只补一点上边距。 */
+.login-back {
+  margin-top: 4px;
 }
 
 .login-card {

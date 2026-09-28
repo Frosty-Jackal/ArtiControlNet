@@ -41,12 +41,15 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
-  disabled: { type: Boolean, default: false }
+  disabled: { type: Boolean, default: false },
+  // Spec24 §2.6：登录后要回填的暂存内容 { text, file }；null = 没有。
+  // 父组件持有它，子组件消费完 emit('draft-consumed') 通知父组件清空。
+  draft: { type: Object, default: null }
 })
-const emit = defineEmits(['send'])
+const emit = defineEmits(['send', 'draft-consumed'])
 
 const text = ref('')
 const file = ref(null)
@@ -131,6 +134,19 @@ function submit() {
   clearFile()
   autoResize()
 }
+
+// Spec24 §2.6：回填（游客被拦下时暂存的内容，登录成功或从登录层返回后填回来）。
+// ⚠️ **immediate: true 不能省**：游客从"点面板 → 登录门 → 登录"那一路进来时，
+//    main-col 里占位的是 LoginGate/面板，ChatInput **还没挂载**；draft 先落进
+//    App.vue 的 ref，等用户切回聊天视图、ChatInput 挂载那一刻才消费。
+//    没有 immediate，这一份就永远填不进去（§14 陷阱 7）。
+watch(() => props.draft, (d) => {
+  if (!d) return
+  text.value = d.text || ''
+  if (d.file) setFile(d.file) // setFile 会自己 revoke 上一份 objectURL 并生成新预览
+  nextTick(autoResize)        // textarea 高度按新内容重算
+  emit('draft-consumed')      // → App.vue 把 draft 置回 null（watch 收到 null 即早退）
+}, { immediate: true })
 </script>
 
 <style scoped>

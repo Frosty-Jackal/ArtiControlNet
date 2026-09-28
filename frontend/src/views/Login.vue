@@ -8,7 +8,7 @@
         <span class="brand-dot"></span>
         <h1>ArtiControlNet</h1>
       </div>
-      <p class="login-sub">赋能设计的 AIGC 系统 · 登录后使用</p>
+      <p class="login-sub">AI辅助设计的系统 · 登录后使用</p>
 
       <form class="login-form" @submit.prevent="submit">
         <input
@@ -48,6 +48,10 @@
         </div>
 
         <p v-if="regCfg" class="login-service">有问题请致信官方客服：{{ regCfg.contact_email }}</p>
+
+        <!-- Spec24 §5.8：登录层现在是覆盖层，用户必须有一条退路回到游客界面。
+             少了它，点开登录就等于"只能登录或关标签页"。 -->
+        <button type="button" class="btn-link login-back" @click="emit('close')">← 返回继续浏览</button>
       </div>
     </div>
 
@@ -85,6 +89,9 @@ import logoUrl from '../assets/logo.svg'
 import { useAuthStore } from '../store/auth'
 import { takeQuotaNotice } from '../utils/quotaNotice'
 import { trackClick } from '../utils/track'
+
+// Spec24 §5.8：登录层是覆盖层（App.vue 的兄弟节点），「← 返回继续浏览」靠它收起。
+const emit = defineEmits(['close'])
 
 const auth = useAuthStore()
 const username = ref('')
