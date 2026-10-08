@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /images/
+
+Sitemap: https://articontrolnet.fun/sitemap.xml

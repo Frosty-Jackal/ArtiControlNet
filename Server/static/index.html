@@ -4,11 +4,119 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
     <title>ArtiControlNet - AI辅助设计的系统</title>
-    <script type="module" crossorigin src="/assets/index-C1l4g2Yq.js"></script>
+    <meta
+      name="description"
+      content="ArtiControlNet 是一个 AI 辅助设计的 AIGC 系统：用自然语言描述需求，即可完成文生图、线稿生图与图像分析，为设计师提供从灵感到成图的一站式创作体验。"
+    />
+    <link rel="canonical" href="https://articontrolnet.fun/" />
+
+    <!-- 分享预览（微信 / QQ / 群聊 / 社交平台） -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ArtiControlNet" />
+    <meta property="og:title" content="ArtiControlNet - AI辅助设计的系统" />
+    <meta
+      property="og:description"
+      content="用自然语言描述设计需求，ArtiControlNet 帮你完成文生图、线稿生图与图像分析。"
+    />
+    <meta property="og:url" content="https://articontrolnet.fun/" />
+    <meta property="og:image" content="https://articontrolnet.fun/og-cover.jpg" />
+    <meta property="og:image:width" content="2420" />
+    <meta property="og:image:height" content="1280" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- 百度站长验证：这一行原先只存在于线上 Server/static/index.html，
+         在仓库里没有，重新构建就会被抹掉。放到源码里才能随构建一起产出。 -->
+    <meta name="baidu-site-verification" content="codeva-PtSrVJevoT" />
+
+    <!--
+      #app 里的静态内容是给搜索引擎爬虫看的。
+      Bingbot 对 JS 渲染支持很弱，抓 / 时 Vue 还没跑，body 里原本只有一个
+      空 <div id="app">，于是被判为「无正文 / 缺 H1 / 缺 description」。
+      这段内容在 main.js 挂载前会被显式清掉（Vue 3 不会自己清），
+      所以真实用户只会看到一瞬的开场屏，随后进入聊天界面。
+      ⚠️ 样式必须是内联的：main.css 由构建产出，样式类名不在里面。
+    -->
+    <style>
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        padding: 40px 24px;
+        overflow: auto;
+        text-align: center;
+        background: #0c0915;
+        color: #f5f0ff;
+        font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+      }
+      #boot h1 {
+        margin: 0;
+        font-size: clamp(22px, 4vw, 30px);
+        font-weight: 700;
+        line-height: 1.4;
+      }
+      #boot h1 em {
+        font-style: normal;
+        color: #c084fc;
+      }
+      #boot p {
+        margin: 0;
+        max-width: 660px;
+        font-size: 15px;
+        line-height: 1.9;
+        color: #c4b5fd;
+      }
+      #boot ul {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        max-width: 760px;
+        list-style: none;
+      }
+      #boot li {
+        padding: 8px 14px;
+        border-radius: 9999px;
+        background: #1e1533;
+        border: 1px solid #2e2249;
+        font-size: 13px;
+        color: #c4b5fd;
+      }
+      #boot .boot-status {
+        margin-top: 4px;
+        font-size: 13px;
+        color: #8b7aad;
+      }
+    </style>
+
+    <script type="module" crossorigin src="/assets/index-DDopl8mb.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-BeIxyZaB.css">
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div id="boot">
+        <h1>ArtiControlNet —— <em>AI 辅助设计系统</em></h1>
+        <p>
+          用自然语言描述你想要的画面，ArtiControlNet
+          会调用云端大模型完成文生图、线稿生图与图像分析，
+          把一句话变成可交付的设计稿。
+        </p>
+        <ul>
+          <li>文生图：描述画面，直接生成设计图</li>
+          <li>线稿生图：上传手绘线稿，配文字上色成图</li>
+          <li>图像分析：上传图片，用自然语言提问</li>
+          <li>我的作品：生成结果自动入库，可回看与分享</li>
+        </ul>
+        <p class="boot-status">正在加载 ArtiControlNet…</p>
+      </div>
+    </div>
   </body>
 </html>
