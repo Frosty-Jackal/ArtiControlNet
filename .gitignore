@@ -6,6 +6,10 @@ dist/
 .env
 Server/.env
 *.env.local
+# .env 的备份快照（与下面的 artcn.db.bak* 同一个理由：备份只留本地）。
+# 命名见 README：cp Server/.env Server/.env.bak-$(date +%F)
+# 不加这一条的话，仓库要求的 `git add -A` 会把含全部密钥的 .env 备份提交上去。
+Server/.env.bak*
 
 # 运行时临时数据
 Server/storage/
